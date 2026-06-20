@@ -610,7 +610,7 @@ function buildPingPongPrompt(input: {
   const ownDocument = input.ownDraft.document;
   const otherDocument = input.otherDraft.document;
   return [
-    `Ты ${input.author.title}. Это ping-pong round ${input.roundNumber} создания ТЗ.`,
+    `Это раунд согласования ${input.roundNumber} для создания ТЗ.`,
     "",
     "Твоя задача:",
     "1. Критически изучи свой черновик R0.",
@@ -674,10 +674,10 @@ function buildConvergenceCheckPrompt(input: {
   const otherDocument = input.otherPingPong.document;
   const nextRoundNumber = input.roundNumber + 1;
   return [
-    `Ты ${input.author.title}. Это проверка схождения после ping-pong round ${input.roundNumber}.`,
+    `Это проверка схождения после раунда согласования ${input.roundNumber}.`,
     "",
     "Цель:",
-    "- Дать короткий структурный вердикт для Process Engine.",
+    "- Дать короткий структурный вердикт для движка процесса.",
     "- Не переписывать всё ТЗ заново.",
     "- Чётко сказать: можно идти к синтезу или нужен следующий раунд.",
     "",
@@ -690,14 +690,14 @@ function buildConvergenceCheckPrompt(input: {
     "Исходная задача:",
     input.issue.title,
     "",
-    `Твой ping-pong ответ round ${input.roundNumber}:`,
+    `Твой ответ в раунде согласования ${input.roundNumber}:`,
     `Документ: ${ownDocument.title ?? ownDocument.key}`,
     `document_id: ${ownDocument.id}`,
     `revision_id: ${ownDocument.latestRevisionId}`,
     "",
     input.ownPingPong.body,
     "",
-    `Ping-pong ответ ${input.otherAuthor.displayName} round ${input.roundNumber}:`,
+    `Ответ ${input.otherAuthor.displayName} в раунде согласования ${input.roundNumber}:`,
     `Документ: ${otherDocument.title ?? otherDocument.key}`,
     `document_id: ${otherDocument.id}`,
     `revision_id: ${otherDocument.latestRevisionId}`,
@@ -743,7 +743,7 @@ function buildPingPongFollowUpPrompt(input: {
   roundNumber: number;
 }) {
   return [
-    `Ты ${input.author.title}. Это ping-pong round ${input.roundNumber} создания ТЗ.`,
+    `Это раунд согласования ${input.roundNumber} для создания ТЗ.`,
     "",
     "Почему запущен новый раунд:",
     "- После проверки схождения хотя бы один автор вернул `ИТЕРИРУЕМ`.",
@@ -754,18 +754,18 @@ function buildPingPongFollowUpPrompt(input: {
     `2. Изучи вердикт ${input.otherAuthor.displayName}.`,
     `3. Закрой спорные пункты, из-за которых round ${input.roundNumber - 1} не был признан завершённым.`,
     "4. Предложи обновлённую лучшую версию ТЗ или точечный патч к ней.",
-    "5. В конце снова дай структурный блок для Process Engine.",
+    "5. В конце снова дай структурный блок для движка процесса.",
     "",
     "Исходная задача:",
     input.issue.title,
     "",
-    `Твой вердикт convergence check round ${input.roundNumber - 1}:`,
+    `Твоя предыдущая проверка схождения, раунд ${input.roundNumber - 1}:`,
     `Распознанный verdict: ${input.ownVerdict.verdict}`,
     `Документ: ${input.ownCheck.document.title ?? input.ownCheck.document.key}`,
     "",
     input.ownCheck.body,
     "",
-    `Вердикт ${input.otherAuthor.displayName} convergence check round ${input.roundNumber - 1}:`,
+    `Проверка схождения ${input.otherAuthor.displayName}, раунд ${input.roundNumber - 1}:`,
     `Распознанный verdict: ${input.otherVerdict.verdict}`,
     `Документ: ${input.otherCheck.document.title ?? input.otherCheck.document.key}`,
     "",
@@ -1177,7 +1177,7 @@ function traceDocumentBody(input: { issueTitle: string; run: TzProcessRunSummary
     `Лимит раундов: ${input.run.maxRounds}`,
     `Лимит QA-доработок: ${input.run.qaReworkLimit}`,
     "",
-    "Этот документ ведёт плагин TZ Process Engine. Видимая трасса хранится здесь, а авторитетное состояние процесса живёт в namespace плагина в Postgres.",
+    "Этот документ ведёт плагин движка ТЗ. Видимая трасса хранится здесь, а авторитетное состояние процесса живёт в namespace плагина в Postgres.",
   ].join("\n");
 }
 
@@ -1357,7 +1357,7 @@ async function createOrReuseDraftIssue(
     goalId: input.issue.goalId ?? undefined,
     parentId: input.issue.id,
     inheritExecutionWorkspaceFromIssueId: input.issue.id,
-    title: `${rootLabel} blind round 0: черновик ТЗ от ${input.author.displayName}`,
+    title: `${rootLabel} слепой раунд 0: черновик ТЗ от ${input.author.displayName}`,
     description: buildBlindDraftPrompt(input),
     status: "todo",
     priority: input.issue.priority ?? "medium",
@@ -1399,7 +1399,7 @@ async function createOrReusePingPongIssue(
     goalId: input.issue.goalId ?? undefined,
     parentId: input.issue.id,
     inheritExecutionWorkspaceFromIssueId: input.issue.id,
-    title: `${rootLabel} ping-pong round ${input.roundNumber}: ${input.author.displayName} отвечает ${input.otherAuthor.displayName}`,
+    title: `${rootLabel} раунд согласования ${input.roundNumber}: ${input.author.displayName} отвечает ${input.otherAuthor.displayName}`,
     description: buildPingPongPrompt(input),
     status: "todo",
     priority: input.issue.priority ?? "medium",
@@ -1441,7 +1441,7 @@ async function createOrReuseConvergenceCheckIssue(
     goalId: input.issue.goalId ?? undefined,
     parentId: input.issue.id,
     inheritExecutionWorkspaceFromIssueId: input.issue.id,
-    title: `${rootLabel} convergence check round ${input.roundNumber}: ${input.author.displayName} подтверждает схождение`,
+    title: `${rootLabel} проверка схождения, раунд ${input.roundNumber}: ${input.author.displayName} подтверждает схождение`,
     description: buildConvergenceCheckPrompt(input),
     status: "todo",
     priority: input.issue.priority ?? "medium",
@@ -1521,7 +1521,7 @@ async function createOrReuseFollowUpPingPongIssue(
     goalId: input.issue.goalId ?? undefined,
     parentId: input.issue.id,
     inheritExecutionWorkspaceFromIssueId: input.issue.id,
-    title: `${rootLabel} ping-pong round ${input.roundNumber}: ${input.author.displayName} закрывает дельты`,
+    title: `${rootLabel} раунд согласования ${input.roundNumber}: ${input.author.displayName} закрывает дельты`,
     description: buildPingPongFollowUpPrompt(input),
     status: "todo",
     priority: input.issue.priority ?? "medium",
@@ -1595,7 +1595,7 @@ async function dispatchBlindDraftTasks(ctx: PluginContext, run: TzProcessRunSumm
     draftTasks.map((task) => task.issue.id),
     run.companyId,
     {
-      reason: "TZ Process Engine: запустить слепой раунд 0",
+      reason: "Движок ТЗ: запустить слепой раунд 0",
       contextSource: "tz_process_engine.blind_draft_r0",
       idempotencyKeyPrefix: `${run.id}:blind-draft-r0`,
     },
@@ -1698,7 +1698,7 @@ async function markRunNeedsOperatorForMissingDrafts(
   });
   await ctx.activity.log({
     companyId: input.run.companyId,
-    message: "Ping-pong round 1 не запущен: не хватает готовых черновиков или документов",
+    message: "Раунд согласования 1 не запущен: не хватает готовых черновиков или документов",
     entityType: "issue",
     entityId: input.issue.id,
     metadata: {
@@ -1817,7 +1817,7 @@ async function dispatchPingPongRoundOneIfReady(ctx: PluginContext, run: TzProces
     pingPongTasks.map((task) => task.issue.id),
     run.companyId,
     {
-      reason: "TZ Process Engine: запустить ping-pong round 1",
+      reason: "Движок ТЗ: запустить раунд согласования 1",
       contextSource: "tz_process_engine.ping_pong_r1",
       idempotencyKeyPrefix: `${run.id}:ping-pong-r1`,
     },
@@ -1883,7 +1883,7 @@ async function dispatchPingPongRoundOneIfReady(ctx: PluginContext, run: TzProces
   });
   await ctx.activity.log({
     companyId: run.companyId,
-    message: "Ping-pong round 1 запущен: авторы получили черновики друг друга",
+    message: "Раунд согласования 1 запущен: авторы получили черновики друг друга",
     entityType: "issue",
     entityId: run.rootIssueId,
     metadata: {
@@ -1933,7 +1933,7 @@ async function markRunNeedsOperatorForMissingPingPongOutputs(
   });
   await ctx.activity.log({
     companyId: input.run.companyId,
-    message: "Проверка схождения не запущена: не хватает ping-pong ответов или документов",
+    message: "Проверка схождения не запущена: не хватает ответов раунда согласования или документов",
     entityType: "issue",
     entityId: input.issue.id,
     metadata: {
@@ -2052,7 +2052,7 @@ async function dispatchConvergenceCheckIfReady(ctx: PluginContext, run: TzProces
     checkTasks.map((task) => task.issue.id),
     run.companyId,
     {
-      reason: `TZ Process Engine: проверить схождение после ping-pong round ${roundNumber}`,
+      reason: `Движок ТЗ: проверить схождение после раунда согласования ${roundNumber}`,
       contextSource: `tz_process_engine.convergence_check_r${roundNumber}`,
       idempotencyKeyPrefix: `${run.id}:convergence-check-r${roundNumber}`,
     },
@@ -2119,7 +2119,7 @@ async function dispatchConvergenceCheckIfReady(ctx: PluginContext, run: TzProces
   });
   await ctx.activity.log({
     companyId: run.companyId,
-    message: `Проверка схождения round ${roundNumber} запущена: авторы должны дать короткий вердикт`,
+    message: `Проверка схождения, раунд ${roundNumber}: авторы должны дать короткий вердикт`,
     entityType: "issue",
     entityId: run.rootIssueId,
     metadata: {
@@ -2169,7 +2169,7 @@ async function markRunNeedsOperatorForConvergenceDecision(
   });
   await ctx.activity.log({
     companyId: input.run.companyId,
-    message: "Process Engine не смог автоматически принять решение после проверки схождения",
+    message: "Движок процесса не смог автоматически принять решение после проверки схождения",
     entityType: "issue",
     entityId: input.issue.id,
     metadata: {
@@ -2250,7 +2250,7 @@ async function dispatchFollowUpPingPongFromConvergenceDecision(
     pingPongTasks.map((task) => task.issue.id),
     input.run.companyId,
     {
-      reason: `TZ Process Engine: запустить ping-pong round ${roundNumber} по оставшимся дельтам`,
+      reason: `Движок ТЗ: запустить раунд согласования ${roundNumber} по оставшимся дельтам`,
       contextSource: `tz_process_engine.ping_pong_r${roundNumber}`,
       idempotencyKeyPrefix: `${input.run.id}:ping-pong-r${roundNumber}`,
     },
@@ -2324,7 +2324,7 @@ async function dispatchFollowUpPingPongFromConvergenceDecision(
   });
   await ctx.activity.log({
     companyId: input.run.companyId,
-    message: `Ping-pong round ${roundNumber} запущен: после проверки схождения остались дельты`,
+    message: `Раунд согласования ${roundNumber} запущен: после проверки схождения остались дельты`,
     entityType: "issue",
     entityId: input.run.rootIssueId,
     metadata: {
@@ -2362,7 +2362,7 @@ async function dispatchSynthesisFromConvergenceDecision(
     agent: input.ctoAgent,
   });
   const wakeups = await ctx.issues.requestWakeups([synthesisIssue.id], input.run.companyId, {
-    reason: "TZ Process Engine: запустить CTO-синтез финального ТЗ",
+    reason: "Движок ТЗ: запустить синтез финального ТЗ",
     contextSource: "tz_process_engine.cto_synthesis",
     idempotencyKeyPrefix: `${input.run.id}:cto-synthesis-r${input.roundNumber}`,
   });
@@ -2414,7 +2414,7 @@ async function dispatchSynthesisFromConvergenceDecision(
   });
   await ctx.activity.log({
     companyId: input.run.companyId,
-    message: "CTO-синтез запущен: оба автора подтвердили схождение",
+    message: "Синтез финального ТЗ запущен: оба автора подтвердили схождение",
     entityType: "issue",
     entityId: input.run.rootIssueId,
     metadata: {

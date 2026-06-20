@@ -409,7 +409,7 @@ describe("TZ Process Engine plugin", () => {
     ]));
   });
 
-  it("creates ping-pong round 1 tasks after both blind drafts are done", async () => {
+  it("creates agreement round 1 tasks after both blind drafts are done", async () => {
     const companyId = randomUUID();
     const rootIssueId = randomUUID();
     const codexAgentId = randomUUID();
@@ -432,7 +432,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: codexDraftIssueId,
           companyId,
-          title: "GER-118 blind round 0: черновик ТЗ от Автор-Codex",
+          title: "GER-118 слепой раунд 0: черновик ТЗ от Автор-Codex",
           identifier: "GER-149",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -446,7 +446,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: claudeDraftIssueId,
           companyId,
-          title: "GER-118 blind round 0: черновик ТЗ от Автор-Claude",
+          title: "GER-118 слепой раунд 0: черновик ТЗ от Автор-Claude",
           identifier: "GER-150",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -567,7 +567,7 @@ describe("TZ Process Engine plugin", () => {
       }),
     ]));
     const descriptions = pingPongIssues.map((entry) => entry.description).join("\n");
-    expect(descriptions).toContain("Это ping-pong round 1 создания ТЗ");
+    expect(descriptions).toContain("Это раунд согласования 1 для создания ТЗ");
     expect(descriptions).toContain("Codex draft body with acceptance criteria.");
     expect(descriptions).toContain("Claude draft body with risk analysis.");
     expect(descriptions).toContain("review_of_other:");
@@ -577,13 +577,13 @@ describe("TZ Process Engine plugin", () => {
       entry.sql.includes(".tz_process_artifacts") && entry.params?.includes(PING_PONG_ARTIFACT_KEY))).toBe(true);
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        message: "Ping-pong round 1 запущен: авторы получили черновики друг друга",
+        message: "Раунд согласования 1 запущен: авторы получили черновики друг друга",
         entityId: rootIssueId,
       }),
     ]));
   });
 
-  it("creates convergence check tasks after both ping-pong round 1 tasks are done", async () => {
+  it("creates convergence check tasks after agreement round 1 tasks are done", async () => {
     const companyId = randomUUID();
     const rootIssueId = randomUUID();
     const codexAgentId = randomUUID();
@@ -606,7 +606,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: codexPingPongIssueId,
           companyId,
-          title: "GER-118 ping-pong round 1: Автор-Codex отвечает Автор-Claude",
+          title: "GER-118 раунд согласования 1: Автор-Codex отвечает Автор-Claude",
           identifier: "GER-156",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -620,7 +620,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: claudePingPongIssueId,
           companyId,
-          title: "GER-118 ping-pong round 1: Автор-Claude отвечает Автор-Codex",
+          title: "GER-118 раунд согласования 1: Автор-Claude отвечает Автор-Codex",
           identifier: "GER-157",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -652,15 +652,15 @@ describe("TZ Process Engine plugin", () => {
       issueId: codexPingPongIssueId,
       companyId,
       key: "pingpong-codex-r1",
-      title: "Ping-pong Автор-Codex R1",
-      body: "Codex ping-pong response with remaining deltas.",
+      title: "Раунд согласования Автор-Codex R1",
+      body: "Codex agreement response with remaining deltas.",
     });
     await harness.ctx.issues.documents.upsert({
       issueId: claudePingPongIssueId,
       companyId,
       key: "plan",
-      title: "ТЗ GER-118 — Автор-Claude (пинг-понг раунд 1)",
-      body: "Claude ping-pong response with convergence notes.",
+      title: "ТЗ GER-118 — Автор-Claude (раунд согласования 1)",
+      body: "Claude agreement response with convergence notes.",
     });
 
     const runRow = {
@@ -759,9 +759,9 @@ describe("TZ Process Engine plugin", () => {
       }),
     ]));
     const descriptions = checkIssues.map((entry) => entry.description).join("\n");
-    expect(descriptions).toContain("Это проверка схождения после ping-pong round 1");
-    expect(descriptions).toContain("Codex ping-pong response with remaining deltas.");
-    expect(descriptions).toContain("Claude ping-pong response with convergence notes.");
+    expect(descriptions).toContain("Это проверка схождения после раунда согласования 1");
+    expect(descriptions).toContain("Codex agreement response with remaining deltas.");
+    expect(descriptions).toContain("Claude agreement response with convergence notes.");
     expect(descriptions).toContain("verdict: СОШЛИСЬ");
     expect(descriptions).toContain("remaining_deltas: []");
     expect(harness.dbExecutes.some((entry) =>
@@ -770,13 +770,13 @@ describe("TZ Process Engine plugin", () => {
       entry.sql.includes(".tz_process_artifacts") && entry.params?.includes(CONVERGENCE_CHECK_ARTIFACT_KEY))).toBe(true);
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        message: "Проверка схождения round 1 запущена: авторы должны дать короткий вердикт",
+        message: "Проверка схождения, раунд 1: авторы должны дать короткий вердикт",
         entityId: rootIssueId,
       }),
     ]));
   });
 
-  it("creates convergence check tasks after both ping-pong round 2 tasks are done", async () => {
+  it("creates convergence check tasks after agreement round 2 tasks are done", async () => {
     const companyId = randomUUID();
     const rootIssueId = randomUUID();
     const codexAgentId = randomUUID();
@@ -799,7 +799,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: codexPingPongIssueId,
           companyId,
-          title: "GER-118 ping-pong round 2: Автор-Codex закрывает дельты",
+          title: "GER-118 раунд согласования 2: Автор-Codex закрывает дельты",
           identifier: "GER-162",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -813,7 +813,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: claudePingPongIssueId,
           companyId,
-          title: "GER-118 ping-pong round 2: Автор-Claude закрывает дельты",
+          title: "GER-118 раунд согласования 2: Автор-Claude закрывает дельты",
           identifier: "GER-163",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -845,14 +845,14 @@ describe("TZ Process Engine plugin", () => {
       issueId: codexPingPongIssueId,
       companyId,
       key: "pingpong-codex-r2",
-      title: "Ping-pong Автор-Codex R2",
+      title: "Раунд согласования Автор-Codex R2",
       body: "Codex R2 accepted Claude defaults and returned СОШЛИСЬ.",
     });
     await harness.ctx.issues.documents.upsert({
       issueId: claudePingPongIssueId,
       companyId,
       key: "pingpong-claude-r2",
-      title: "Ping-pong Автор-Claude R2",
+      title: "Раунд согласования Автор-Claude R2",
       body: "Claude R2 closed the four Codex deltas.",
     });
 
@@ -948,20 +948,20 @@ describe("TZ Process Engine plugin", () => {
       }),
     ]));
     const descriptions = checkIssues.map((entry) => entry.description).join("\n");
-    expect(descriptions).toContain("Это проверка схождения после ping-pong round 2");
+    expect(descriptions).toContain("Это проверка схождения после раунда согласования 2");
     expect(descriptions).toContain("Codex R2 accepted Claude defaults");
     expect(descriptions).toContain("Claude R2 closed the four Codex deltas");
     expect(harness.dbExecutes.some((entry) =>
       entry.params?.includes("convergence_check_round_2_dispatched"))).toBe(true);
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        message: "Проверка схождения round 2 запущена: авторы должны дать короткий вердикт",
+        message: "Проверка схождения, раунд 2: авторы должны дать короткий вердикт",
         entityId: rootIssueId,
       }),
     ]));
   });
 
-  it("creates ping-pong round 2 tasks when any convergence verdict says iterate", async () => {
+  it("creates agreement round 2 tasks when any convergence verdict says iterate", async () => {
     const companyId = randomUUID();
     const rootIssueId = randomUUID();
     const codexAgentId = randomUUID();
@@ -984,7 +984,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: codexCheckIssueId,
           companyId,
-          title: "GER-118 convergence check round 1: Автор-Codex подтверждает схождение",
+          title: "GER-118 проверка схождения, раунд 1: Автор-Codex подтверждает схождение",
           identifier: "GER-160",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -998,7 +998,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: claudeCheckIssueId,
           companyId,
-          title: "GER-118 convergence check round 1: Автор-Claude подтверждает схождение",
+          title: "GER-118 проверка схождения, раунд 1: Автор-Claude подтверждает схождение",
           identifier: "GER-161",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -1144,14 +1144,14 @@ describe("TZ Process Engine plugin", () => {
       }),
     ]));
     const descriptions = roundTwoIssues.map((entry) => entry.description).join("\n");
-    expect(descriptions).toContain("Это ping-pong round 2 создания ТЗ");
+    expect(descriptions).toContain("Это раунд согласования 2 для создания ТЗ");
     expect(descriptions).toContain("Распознанный verdict: iterate");
     expect(descriptions).toContain("Распознанный verdict: converged");
     expect(harness.dbExecutes.some((entry) =>
       entry.params?.includes("ping_pong_round_2_dispatched"))).toBe(true);
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        message: "Ping-pong round 2 запущен: после проверки схождения остались дельты",
+        message: "Раунд согласования 2 запущен: после проверки схождения остались дельты",
         entityId: rootIssueId,
       }),
     ]));
@@ -1183,7 +1183,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: codexPingPongIssueId,
           companyId,
-          title: "GER-118 ping-pong round 1: Автор-Codex отвечает Автор-Claude",
+          title: "GER-118 раунд согласования 1: Автор-Codex отвечает Автор-Claude",
           identifier: "GER-156",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -1197,7 +1197,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: claudePingPongIssueId,
           companyId,
-          title: "GER-118 ping-pong round 1: Автор-Claude отвечает Автор-Codex",
+          title: "GER-118 раунд согласования 1: Автор-Claude отвечает Автор-Codex",
           identifier: "GER-157",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -1211,7 +1211,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: codexCheckIssueId,
           companyId,
-          title: "GER-118 convergence check round 1: Автор-Codex подтверждает схождение",
+          title: "GER-118 проверка схождения, раунд 1: Автор-Codex подтверждает схождение",
           identifier: "GER-160",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -1225,7 +1225,7 @@ describe("TZ Process Engine plugin", () => {
         issue({
           id: claudeCheckIssueId,
           companyId,
-          title: "GER-118 convergence check round 1: Автор-Claude подтверждает схождение",
+          title: "GER-118 проверка схождения, раунд 1: Автор-Claude подтверждает схождение",
           identifier: "GER-161",
           parentId: rootIssueId,
           projectId: "project-1",
@@ -1263,7 +1263,7 @@ describe("TZ Process Engine plugin", () => {
       issueId: codexPingPongIssueId,
       companyId,
       key: "pingpong-codex-r1",
-      title: "Ping-pong Автор-Codex R1",
+      title: "Раунд согласования Автор-Codex R1",
       body: "Codex agreed technical specification material.",
     });
     await harness.ctx.issues.documents.upsert({
@@ -1399,7 +1399,7 @@ describe("TZ Process Engine plugin", () => {
       entry.sql.includes(".tz_process_artifacts") && entry.params?.includes(SYNTHESIS_ARTIFACT_KEY))).toBe(true);
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        message: "CTO-синтез запущен: оба автора подтвердили схождение",
+        message: "Синтез финального ТЗ запущен: оба автора подтвердили схождение",
         entityId: rootIssueId,
       }),
     ]));
