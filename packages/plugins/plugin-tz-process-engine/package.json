@@ -1,0 +1,42 @@
+{
+  "name": "@paperclipai/plugin-tz-process-engine",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Paperclip plugin MVP for deterministic GPT/Claude technical-spec process orchestration.",
+  "files": [
+    "dist",
+    "migrations",
+    "README.md"
+  ],
+  "scripts": {
+    "prebuild": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps",
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "keywords": [
+    "paperclip",
+    "plugin",
+    "automation",
+    "orchestration",
+    "technical-spec"
+  ],
+  "author": "Paperclip",
+  "license": "MIT",
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@paperclipai/shared": "workspace:*",
+    "@types/node": "^22.19.21",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.8"
+  }
+}

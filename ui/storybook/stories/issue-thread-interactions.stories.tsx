@@ -174,6 +174,87 @@ function InteractiveAskUserQuestionsCard() {
   );
 }
 
+function RussianAskUserQuestionsCard() {
+  const [interaction, setInteraction] = useState<AskUserQuestionsInteraction>({
+    ...pendingAskUserQuestionsInteraction,
+    title: "Уточнить задачу перед созданием ТЗ",
+    summary:
+      "Ответьте один раз. После этого оба автора получат одинаковый пакет уточнений и начнут слепой раунд.",
+    payload: {
+      ...pendingAskUserQuestionsInteraction.payload,
+      title: "Что нужно уточнить перед запуском авторов?",
+      submitLabel: "Отправить ответы",
+      questions: [
+        {
+          id: "task-ready",
+          prompt: "Описание задачи уже достаточно полное, чтобы авторам начинать черновики ТЗ?",
+          helpText:
+            "Если нужно что-то добавить, выберите второй вариант и впишите недостающие вводные в поле ответа.",
+          selectionMode: "single",
+          required: true,
+          options: [
+            {
+              id: "ready",
+              label: "Да, можно начинать",
+              description: "Авторы сразу перейдут к слепому раунду после фиксации ответа.",
+            },
+            {
+              id: "need-details",
+              label: "Нужно уточнить",
+              description: "Добавьте недостающие вводные в свободном тексте ответа.",
+            },
+          ],
+        },
+        {
+          id: "context",
+          prompt: "Какой контекст авторам нужно учитывать перед черновиками?",
+          helpText: "Выберите все источники, которые должны попасть в пакет уточнений.",
+          selectionMode: "multi",
+          required: true,
+          options: [
+            {
+              id: "current-task",
+              label: "Текущую задачу",
+              description: "Брать описание, критерии готовности и открытые вопросы из этой задачи.",
+            },
+            {
+              id: "repository",
+              label: "Репозиторий",
+              description: "Сверять требования с кодом без права записи.",
+            },
+            {
+              id: "operator-notes",
+              label: "Заметки оператора",
+              description: "Учитывать дополнительные пояснения из свободного ответа.",
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  return (
+    <IssueThreadInteractionCard
+      interaction={interaction}
+      agentMap={storybookAgentMap}
+      currentUserId={issueThreadInteractionFixtureMeta.currentUserId}
+      userLabelMap={boardUserLabels}
+      onSubmitInteractionAnswers={(_interaction, answers) =>
+        setInteraction({
+          ...interaction,
+          status: "answered",
+          resolvedAt: new Date("2026-06-20T18:15:00.000Z"),
+          resolvedByUserId: issueThreadInteractionFixtureMeta.currentUserId,
+          result: {
+            version: 1,
+            answers,
+            summaryMarkdown: "Оператор ответил на уточняющие вопросы. Можно запускать авторов.",
+          },
+        })}
+    />
+  );
+}
+
 function InteractiveRequestConfirmationCard() {
   const [interaction, setInteraction] = useState<RequestConfirmationInteraction>(
     pendingRequestConfirmationInteraction,
@@ -340,6 +421,19 @@ export const AskUserQuestionsPending: Story = {
         description="Single- and multi-select questions remain local until submitted."
       >
         <InteractiveAskUserQuestionsCard />
+      </ScenarioCard>
+    </StoryFrame>
+  ),
+};
+
+export const AskUserQuestionsPendingRussian: Story = {
+  render: () => (
+    <StoryFrame>
+      <ScenarioCard
+        title="Уточняющие вопросы оператору"
+        description="Русский сценарий для проверки карточки перед запуском авторов ТЗ."
+      >
+        <RussianAskUserQuestionsCard />
       </ScenarioCard>
     </StoryFrame>
   ),

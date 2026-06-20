@@ -20,7 +20,7 @@ import {
   type SuggestedTaskDraft,
   type SuggestedTaskTreeNode,
 } from "../lib/issue-thread-interactions";
-import { cn, formatDateTime, formatShortDate } from "../lib/utils";
+import { cn } from "../lib/utils";
 import { MarkdownBody } from "./MarkdownBody";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
@@ -29,6 +29,35 @@ import { Textarea } from "./ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 const OTHER_ANSWER_ID = "__paperclip_other__";
+
+function formatRussianCount(count: number, one: string, few: string, many: string) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${count} ${one}`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} ${few}`;
+  return `${count} ${many}`;
+}
+
+function formatQuestionCount(count: number) {
+  return formatRussianCount(count, "вопрос", "вопроса", "вопросов");
+}
+
+function formatInteractionDate(date: Date | string) {
+  return new Date(date).toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "short",
+  });
+}
+
+function formatInteractionDateTime(date: Date | string) {
+  return new Date(date).toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 interface IssueThreadInteractionCardProps {
   interaction: IssueThreadInteraction;
@@ -72,27 +101,27 @@ function resolveActorLabel(args: {
     return agentMap?.get(agentId)?.name ?? agentId.slice(0, 8);
   }
   if (userId) {
-    return formatAssigneeUserLabel(userId, currentUserId, userLabelMap) ?? "Board";
+    return formatAssigneeUserLabel(userId, currentUserId, userLabelMap) ?? "Доска";
   }
-  return "Unknown";
+  return "Неизвестно";
 }
 
 function statusLabel(status: IssueThreadInteraction["status"]) {
   switch (status) {
     case "pending":
-      return "Pending";
+      return "Ожидает";
     case "accepted":
-      return "Accepted";
+      return "Принято";
     case "rejected":
-      return "Rejected";
+      return "Отклонено";
     case "answered":
-      return "Answered";
+      return "Есть ответ";
     case "cancelled":
-      return "Cancelled";
+      return "Отменено";
     case "expired":
-      return "Expired";
+      return "Истекло";
     case "failed":
-      return "Failed";
+      return "Ошибка";
     default:
       return status;
   }
@@ -101,13 +130,13 @@ function statusLabel(status: IssueThreadInteraction["status"]) {
 function interactionKindLabel(kind: IssueThreadInteraction["kind"]) {
   switch (kind) {
     case "suggest_tasks":
-      return "Suggested tasks";
+      return "Предложенные задачи";
     case "ask_user_questions":
-      return "Ask user questions";
+      return "Уточняющие вопросы";
     case "request_confirmation":
-      return "Confirmation";
+      return "Подтверждение";
     case "request_checkbox_confirmation":
-      return "Checkbox confirmation";
+      return "Подтверждение списком";
     default:
       return kind;
   }
@@ -176,7 +205,7 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
       return {
         shell: "border-2 border-green-500/80 bg-transparent",
         badge: "border-green-500/60 bg-green-500/10 text-green-900 dark:bg-green-500/15 dark:text-green-100",
-        label: "Approved",
+        label: "Одобрено",
         Icon: CheckCircle2,
       };
     case "rejected":
@@ -184,7 +213,7 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
       return {
         shell: "border-2 border-red-500/80 bg-transparent",
         badge: "border-red-500/60 bg-red-500/10 text-red-900 dark:bg-red-500/15 dark:text-red-100",
-        label: "Changes requested",
+        label: "Нужны правки",
         Icon: XCircle,
       };
     case "failed":
@@ -192,14 +221,14 @@ function planStatusClasses(status: IssueThreadInteraction["status"]) {
       return {
         shell: "border-2 border-amber-500/70 bg-transparent",
         badge: "border-amber-500/60 bg-amber-500/10 text-amber-900 dark:bg-amber-500/15 dark:text-amber-100",
-        label: "Expired",
+        label: "Истекло",
         Icon: AlertTriangle,
       };
     default:
       return {
         shell: "border-2 border-violet-500/80 bg-transparent",
         badge: "border-violet-500/60 bg-violet-500/10 text-violet-900 dark:bg-violet-500/15 dark:text-violet-100",
-        label: "In review",
+        label: "На проверке",
         Icon: FileText,
       };
   }
@@ -702,10 +731,11 @@ function QuestionOptionButton({
   );
 }
 
-function AskUserQuestionsCard({
+export function AskUserQuestionsCard({
   interaction,
   onSubmitInteractionAnswers,
   onCancelInteraction,
+  variant = "default",
 }: {
   interaction: AskUserQuestionsInteraction;
   onSubmitInteractionAnswers?: (
@@ -715,6 +745,7 @@ function AskUserQuestionsCard({
   onCancelInteraction?: (
     interaction: AskUserQuestionsInteraction,
   ) => Promise<void> | void;
+  variant?: "default" | "operator";
 }) {
   const [draftAnswers, setDraftAnswers] = useState<Record<string, string[]>>(() =>
     Object.fromEntries(
@@ -836,31 +867,34 @@ function AskUserQuestionsCard({
     }
   }
 
+  const isOperatorVariant = variant === "operator";
+
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background/70 px-2.5 py-1 font-medium uppercase tracking-[0.16em] text-foreground/70">
-          <MessageSquareQuote className="h-3 w-3" />
-          Ask user questions
-        </span>
-        <span>
-          {questions.length === 1
-            ? "1 question"
-            : `${questions.length} questions`}
-        </span>
-      </div>
+      {!isOperatorVariant ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background/70 px-2.5 py-1 font-medium uppercase tracking-[0.16em] text-foreground/70">
+            <MessageSquareQuote className="h-3 w-3" />
+            Уточняющие вопросы
+          </span>
+          <span>{formatQuestionCount(questions.length)}</span>
+        </div>
+      ) : null}
 
       {interaction.status === "pending" ? (
         <div className="space-y-4">
           {questions.map((question, index) => (
             <div
               key={question.id}
-              className="rounded-2xl border border-border/70 bg-background/82 p-4 shadow-[0_18px_42px_rgba(15,23,42,0.06)]"
+              className={cn(
+                "border border-border/70 bg-background/82 p-4 shadow-[0_18px_42px_rgba(15,23,42,0.06)]",
+                isOperatorVariant ? "rounded-sm" : "rounded-2xl",
+              )}
             >
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                    Question {index + 1}
+                    Вопрос {index + 1}
                   </div>
                   <div
                     id={`${interaction.id}-${question.id}-prompt`}
@@ -875,8 +909,8 @@ function AskUserQuestionsCard({
                   ) : null}
                 </div>
                 <TaskField
-                  label={question.selectionMode === "single" ? "Pick" : "Pick many"}
-                  value={question.required ? "Required" : "Optional"}
+                  label={question.selectionMode === "single" ? "Выбрать один" : "Можно несколько"}
+                  value={question.required ? "обязательно" : "необязательно"}
                   tone="subtle"
                 />
               </div>
@@ -913,18 +947,18 @@ function AskUserQuestionsCard({
                   onClick={() =>
                     toggleOption(question.id, OTHER_ANSWER_ID, question.selectionMode)}
                 >
-                  Other
+                  Свой ответ
                 </button>
                 {otherActiveQuestions[question.id] ? (
                   <Textarea
-                    aria-label={`Other answer for ${question.prompt}`}
+                    aria-label={`Свой ответ на вопрос: ${question.prompt}`}
                     value={draftOtherAnswers[question.id] ?? ""}
                     onChange={(event) =>
                       setDraftOtherAnswers((current) => ({
                         ...current,
                         [question.id]: event.target.value,
                       }))}
-                    placeholder="Type your answer"
+                    placeholder="Напишите уточнение"
                     className="min-h-24 bg-background text-sm"
                   />
                 ) : null}
@@ -932,9 +966,14 @@ function AskUserQuestionsCard({
             </div>
           ))}
 
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/75 p-4">
+          <div
+            className={cn(
+              "flex flex-wrap items-center justify-between gap-3 border border-border/70 bg-background/75 p-4",
+              isOperatorVariant ? "rounded-sm" : "rounded-2xl",
+            )}
+          >
             <div className="text-sm text-muted-foreground">
-              Submit once after you finish the full form.
+              Ответьте на обязательные вопросы и нажмите кнопку отправки.
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {onCancelInteraction ? (
@@ -947,10 +986,10 @@ function AskUserQuestionsCard({
                   {cancelling ? (
                     <>
                       <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                      Cancelling...
+                      Отменяю...
                     </>
                   ) : (
-                    "Cancel question"
+                    "Отменить вопрос"
                   )}
                   </Button>
                 ) : null}
@@ -962,10 +1001,10 @@ function AskUserQuestionsCard({
                 {working ? (
                   <>
                     <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    Submitting...
+                    Отправляю...
                   </>
                 ) : (
-                  interaction.payload.submitLabel ?? "Submit answers"
+                  interaction.payload.submitLabel ?? "Отправить ответы"
                 )}
               </Button>
             </div>
@@ -973,11 +1012,11 @@ function AskUserQuestionsCard({
         </div>
       ) : interaction.status === "cancelled" ? (
         <div className="rounded-2xl border border-rose-300/60 bg-rose-50/85 p-4 text-sm leading-6 text-rose-950 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-100">
-          <div className="font-semibold">Question cancelled</div>
+          <div className="font-semibold">Вопрос отменён</div>
           {interaction.result?.cancellationReason ? (
             <p className="mt-1">{interaction.result.cancellationReason}</p>
           ) : (
-            <p className="mt-1">No answer was recorded.</p>
+            <p className="mt-1">Ответ не был сохранён.</p>
           )}
         </div>
       ) : (
@@ -1099,7 +1138,7 @@ function RequestConfirmationResolution({
   if (interaction.status === "accepted") {
     return (
       <div className="flex flex-wrap items-center gap-2 text-sm leading-6 text-foreground">
-        <span className="font-medium">Confirmed</span>
+        <span className="font-medium">Подтверждено</span>
         <RequestConfirmationTargetChip interaction={interaction} target={target} />
       </div>
     );
@@ -1127,12 +1166,12 @@ function RequestConfirmationResolution({
     return (
       <div className="space-y-3 rounded-sm border border-amber-500/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
-          {expiredByComment ? "Expired by comment" : "Expired by target change"}
+          {expiredByComment ? "Истекло из-за комментария" : "Истекло из-за изменения цели"}
         </div>
         <p className="leading-6">
           {expiredByComment
-            ? "A board comment superseded this confirmation before it was resolved."
-            : "The requested target changed before this confirmation was resolved."}
+            ? "Комментарий доски заменил это подтверждение до принятия решения."
+            : "Запрошенная цель изменилась до принятия решения по подтверждению."}
         </p>
         {expiredByComment && interaction.result?.commentId ? (
           <Button asChild size="sm" variant="ghost" className="h-7 px-2 text-amber-950 hover:bg-amber-500/15 dark:text-amber-50">
@@ -1194,8 +1233,8 @@ function RequestConfirmationCard({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  // Screenshots ride along in the decline reason as markdown image refs so the
-  // board can attach images when sending a plan back — no schema change needed.
+  // Скриншоты передаются в причине отказа как markdown-ссылки на изображения,
+  // чтобы доска могла приложить их при возврате плана без изменения схемы.
   const allowScreenshots = isPlan && Boolean(onUploadImage);
   const rejectRequiresReason = interaction.payload.rejectRequiresReason === true;
   const allowDeclineReason = interaction.payload.allowDeclineReason !== false;
@@ -1205,8 +1244,8 @@ function RequestConfirmationCard({
   const declineReasonPlaceholder =
     interaction.payload.declineReasonPlaceholder
     ?? (interaction.payload.acceptLabel === "Approve plan"
-      ? "Optional: what would you like revised?"
-      : "Optional: tell the agent what you'd change.");
+      ? "Необязательно: что нужно доработать?"
+      : "Необязательно: что агенту нужно изменить?");
 
   useEffect(() => {
     setRejectReason(interaction.result?.reason ?? "");
@@ -1481,15 +1520,15 @@ function RequestCheckboxConfirmationResolution({
         <div className="flex flex-wrap items-center gap-2 text-sm leading-6 text-foreground">
           <span className="font-medium">
             {selectedCount === 0
-              ? "Confirmed with no options selected"
-              : `Confirmed ${selectedCount} of ${totalOptions} ${totalOptions === 1 ? "option" : "options"}`}
+              ? "Подтверждено без выбранных вариантов"
+              : `Подтверждено: выбрано ${selectedCount} из ${totalOptions}`}
           </span>
           <RequestConfirmationTargetChip interaction={interaction} target={target} />
         </div>
         {visibleLabels.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {visibleLabels.map((label, index) => (
-              <TaskField key={`${label}-${index}`} label="Selected" value={label} />
+              <TaskField key={`${label}-${index}`} label="Выбрано" value={label} />
             ))}
             {hasHiddenLabels ? (
               <button
@@ -1629,7 +1668,7 @@ function RequestCheckboxConfirmationCard({
   const canReject = !rejectRequiresReason || trimmedRejectReason.length > 0;
   const declineReasonInvalid = rejectRequiresReason && !canReject;
   const declineReasonPlaceholder =
-    interaction.payload.declineReasonPlaceholder ?? "Optional: tell the agent what you'd change.";
+    interaction.payload.declineReasonPlaceholder ?? "Необязательно: что агенту нужно изменить?";
 
   const selectedCount = selectedOptionIds.size;
   const totalOptions = options.length;
@@ -1640,12 +1679,12 @@ function RequestCheckboxConfirmationCard({
 
   const validationMessage = belowMin
     ? minSelected === 1
-      ? "Select at least 1 option."
-      : `Select at least ${minSelected} options.`
+      ? "Выберите минимум 1 вариант."
+      : `Выберите минимум ${minSelected} вариантов.`
     : aboveMax && maxSelected != null
       ? maxSelected === 1
-        ? "Select at most 1 option."
-        : `Select at most ${maxSelected} options.`
+        ? "Выберите максимум 1 вариант."
+        : `Выберите максимум ${maxSelected} вариантов.`
       : null;
 
   function toggleOption(optionId: string, checked: boolean) {
@@ -1707,12 +1746,12 @@ function RequestCheckboxConfirmationCard({
   }
 
   const selectionSummary = totalOptions > 0 && selectedCount === totalOptions
-    ? `All ${totalOptions} options selected`
-    : `${selectedCount} of ${totalOptions} ${totalOptions === 1 ? "option" : "options"} selected`;
+    ? `Выбраны все варианты: ${totalOptions}`
+    : `Выбрано ${selectedCount} из ${totalOptions}`;
   const boundsHint = maxSelected != null
-    ? `Pick ${minSelected === maxSelected ? `exactly ${maxSelected}` : `${minSelected}-${maxSelected}`}.`
+    ? `Выберите ${minSelected === maxSelected ? `ровно ${maxSelected}` : `${minSelected}-${maxSelected}`}.`
     : minSelected > 0
-      ? `Pick at least ${minSelected}.`
+      ? `Выберите минимум ${minSelected}.`
       : null;
 
   return (
@@ -1911,7 +1950,7 @@ export function IssueThreadInteractionCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className={cn("inline-flex items-center gap-1 rounded-sm border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]", styles.badge)}>
               <StatusIcon className="h-3.5 w-3.5" />
-              {isPlan ? "Plan" : interactionKindLabel(interaction.kind)}
+              {isPlan ? "План" : interactionKindLabel(interaction.kind)}
               <span className="text-current/60">/</span>
               {planStyles ? planStyles.label : statusLabel(interaction.status)}
             </span>
@@ -1920,8 +1959,8 @@ export function IssueThreadInteractionCard({
               <span className="inline-flex items-center gap-1 rounded-sm border border-border/70 bg-transparent px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-foreground/70">
                 <ListChecks className="h-3.5 w-3.5" />
                 {interaction.continuationPolicy === "wake_assignee_on_accept"
-                  ? "Wakes on confirm"
-                  : "Wakes assignee"}
+                  ? "Разбудит после подтверждения"
+                  : "Разбудит исполнителя"}
               </span>
             ) : null}
           </div>
@@ -1929,14 +1968,14 @@ export function IssueThreadInteractionCard({
           <div className="mt-3 text-lg font-bold text-foreground">
             {interaction.title
               ?? (interaction.kind === "suggest_tasks"
-                ? "Suggested task tree"
+                ? "Предложенное дерево задач"
                 : interaction.kind === "ask_user_questions"
-                  ? interaction.payload.title ?? "Questions for the operator"
+                  ? interaction.payload.title ?? "Вопросы оператору"
                 : interaction.kind === "request_checkbox_confirmation"
-                  ? "Checkbox confirmation requested"
+                  ? "Запрошено подтверждение списком"
                   : isPlan
-                    ? "Plan review"
-                    : "Confirmation requested")}
+                    ? "Проверка плана"
+                    : "Запрошено подтверждение")}
           </div>
           {interaction.summary ? (
             <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
@@ -1948,12 +1987,12 @@ export function IssueThreadInteractionCard({
         <Tooltip>
           <TooltipTrigger asChild>
             <div className="rounded-sm border border-border/70 bg-transparent px-3 py-2 text-right text-xs text-muted-foreground">
-              <div className="font-medium text-foreground">{formatShortDate(interaction.createdAt)}</div>
-              <div>proposed by {createdByLabel}</div>
+              <div className="font-medium text-foreground">{formatInteractionDate(interaction.createdAt)}</div>
+              <div>предложил {createdByLabel}</div>
             </div>
           </TooltipTrigger>
           <TooltipContent side="bottom" className="text-xs">
-            Created {formatDateTime(interaction.createdAt)}
+            Создано {formatInteractionDateTime(interaction.createdAt)}
           </TooltipContent>
         </Tooltip>
       </div>
@@ -1993,8 +2032,8 @@ export function IssueThreadInteractionCard({
 
       {resolvedByLabel ? (
         <div className="mt-4 border-t border-border/60 pt-3 text-xs text-muted-foreground">
-          Resolved by <span className="font-medium text-foreground">{resolvedByLabel}</span>
-          {interaction.resolvedAt ? ` on ${formatShortDate(interaction.resolvedAt)}` : ""}
+          Решил <span className="font-medium text-foreground">{resolvedByLabel}</span>
+          {interaction.resolvedAt ? ` ${formatInteractionDate(interaction.resolvedAt)}` : ""}
         </div>
       ) : null}
     </div>

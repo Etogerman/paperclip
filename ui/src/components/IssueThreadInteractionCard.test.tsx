@@ -91,13 +91,13 @@ describe("IssueThreadInteractionCard", () => {
     expect(host.querySelectorAll('[role="checkbox"]')).toHaveLength(3);
 
     const otherLink = Array.from(host.querySelectorAll("button")).find((button) =>
-      button.textContent === "Other",
+      button.textContent === "Свой ответ",
     );
     expect(otherLink?.getAttribute("role")).toBeNull();
     expect(otherLink?.className).toContain("underline");
   });
 
-  it("submits written Other answers for pending questions", async () => {
+  it("submits written custom answers for pending questions", async () => {
     const onSubmitInteractionAnswers = vi.fn(async () => undefined);
     const host = renderCard({
       interaction: pendingAskUserQuestionsInteraction,
@@ -105,7 +105,7 @@ describe("IssueThreadInteractionCard", () => {
     });
 
     const otherButtons = Array.from(host.querySelectorAll("button")).filter((button) =>
-      button.textContent?.includes("Other"),
+      button.textContent?.includes("Свой ответ"),
     );
     expect(otherButtons.length).toBeGreaterThan(0);
 
@@ -160,7 +160,7 @@ describe("IssueThreadInteractionCard", () => {
       interaction: pendingAskUserQuestionsInteraction,
       onSubmitInteractionAnswers: vi.fn(),
     });
-    expect(withoutHandler.textContent).not.toContain("Cancel question");
+    expect(withoutHandler.textContent).not.toContain("Отменить вопрос");
 
     act(() => root?.unmount());
     withoutHandler.remove();
@@ -171,7 +171,7 @@ describe("IssueThreadInteractionCard", () => {
       onCancelInteraction: vi.fn(),
       onSubmitInteractionAnswers: vi.fn(),
     });
-    expect(withHandler.textContent).toContain("Cancel question");
+    expect(withHandler.textContent).toContain("Отменить вопрос");
   });
 
   it("makes child tasks explicit in suggested task trees", () => {
@@ -275,7 +275,7 @@ describe("IssueThreadInteractionCard", () => {
       },
     });
 
-    expect(host.textContent).toContain("Wakes on confirm");
+    expect(host.textContent).toContain("Разбудит после подтверждения");
   });
 
   it("renders request confirmation target links and stale-target expiry", () => {
@@ -284,7 +284,7 @@ describe("IssueThreadInteractionCard", () => {
     });
 
     const targetLinks = host.querySelectorAll("a");
-    expect(host.textContent).toContain("Expired by target change");
+    expect(host.textContent).toContain("Истекло из-за изменения цели");
     expect(host.textContent).toContain("Plan v3");
     expect(host.textContent).toContain("Plan v4");
     expect(targetLinks[0]?.getAttribute("href")).toContain("#document-plan");
@@ -344,8 +344,8 @@ describe("IssueThreadInteractionCard", () => {
     const pendingShell = pending.firstElementChild as HTMLElement;
     expect(pendingShell.className).toContain("border-violet-500/80");
     expect(pendingShell.className).not.toContain("border-l-");
-    expect(pending.textContent).toContain("Plan");
-    expect(pending.textContent).toContain("In review");
+    expect(pending.textContent).toContain("План");
+    expect(pending.textContent).toContain("На проверке");
     // Approve is a neutral CTA (foreground/background), not the blue primary.
     const approve = Array.from(pending.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Approve plan"),
@@ -361,7 +361,7 @@ describe("IssueThreadInteractionCard", () => {
       interaction: { ...pendingRequestConfirmationInteraction, status: "accepted" },
     });
     expect((accepted.firstElementChild as HTMLElement).className).toContain("border-green-500/80");
-    expect(accepted.textContent).toContain("Approved");
+    expect(accepted.textContent).toContain("Одобрено");
 
     act(() => root?.unmount());
     accepted.remove();
@@ -375,7 +375,7 @@ describe("IssueThreadInteractionCard", () => {
       },
     });
     expect((rejected.firstElementChild as HTMLElement).className).toContain("border-red-500/80");
-    expect(rejected.textContent).toContain("Changes requested");
+    expect(rejected.textContent).toContain("Нужны правки");
   });
 
   it("attaches screenshots to a plan request-changes reason as markdown images", async () => {

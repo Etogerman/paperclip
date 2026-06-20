@@ -1113,7 +1113,7 @@ export interface PluginIssueDocumentsClient {
    *
    * Requires the `issue.documents.write` capability.
    *
-   * @param input - Document data including issueId, key, body, and optional title/format/changeSummary
+   * @param input - Document data including issueId, key, body, and optional title/format/changeSummary/baseRevisionId
    */
   upsert(input: {
     issueId: string;
@@ -1123,6 +1123,7 @@ export interface PluginIssueDocumentsClient {
     title?: string;
     format?: string;
     changeSummary?: string;
+    baseRevisionId?: string | null;
   }): Promise<IssueDocument>;
 
   /**
@@ -1137,6 +1138,29 @@ export interface PluginIssueDocumentsClient {
    * @param companyId - UUID of the company
    */
   delete(issueId: string, key: string, companyId: string): Promise<void>;
+}
+
+export interface PluginIssueInteractionsListOptions {
+  /** Filter by interaction status. */
+  status?: IssueThreadInteraction["status"];
+  /** Filter by interaction kind. */
+  kind?: IssueThreadInteraction["kind"];
+  /** Maximum number of interactions to return. */
+  limit?: number;
+  /** Number of matching interactions to skip. */
+  offset?: number;
+}
+
+/**
+ * Read issue thread interactions. Requires `issue.interactions.read`.
+ */
+export interface PluginIssueInteractionsClient {
+  list(
+    issueId: string,
+    companyId: string,
+    options?: PluginIssueInteractionsListOptions,
+  ): Promise<IssueThreadInteraction[]>;
+  get(interactionId: string, companyId: string): Promise<IssueThreadInteraction | null>;
 }
 
 export interface PluginIssueMutationActor {
@@ -1312,7 +1336,7 @@ export interface PluginIssueSummariesClient {
 }
 
 /**
- * `ctx.issues` — read and mutate issues plus comments.
+ * `ctx.issues` — read and mutate issues plus comments, interactions, and documents.
  *
  * Requires:
  * - `issues.read` for read operations
@@ -1323,6 +1347,7 @@ export interface PluginIssueSummariesClient {
  * - `issues.orchestration.read` for orchestration summaries
  * - `issue.comments.read` for `listComments`
  * - `issue.comments.create` for `createComment`
+ * - `issue.interactions.read` for `interactions.list` and `interactions.get`
  * - `issue.interactions.create` for `createInteraction`, `suggestTasks`, `askUserQuestions`, `requestConfirmation`, and `requestCheckboxConfirmation`
  * - `issue.documents.read` for `documents.list` and `documents.get`
  * - `issue.documents.write` for `documents.upsert` and `documents.delete`
@@ -1462,6 +1487,8 @@ export interface PluginIssuesClient {
     companyId: string,
     options?: { authorAgentId?: string },
   ): Promise<RequestCheckboxConfirmationInteraction>;
+  /** Read issue thread interactions. Requires `issue.interactions.read`. */
+  interactions: PluginIssueInteractionsClient;
   /** Read and write issue documents. Requires `issue.documents.read` / `issue.documents.write`. */
   documents: PluginIssueDocumentsClient;
   /** Read and write blocker relationships. */
