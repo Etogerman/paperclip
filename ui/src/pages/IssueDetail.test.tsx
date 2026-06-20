@@ -1103,7 +1103,7 @@ describe("IssueDetail", () => {
     ).toBe(false);
   });
 
-  it("surfaces pending operator questions above the issue tabs", async () => {
+  it("surfaces pending operator questions directly above the issue description", async () => {
     mockIssuesApi.get.mockResolvedValue(createIssue());
     mockIssuesApi.listInteractions.mockResolvedValue([
       createConfirmationInteraction(),
@@ -1121,12 +1121,16 @@ describe("IssueDetail", () => {
     await flushReact();
     await flushReact();
 
-    expect(container.textContent).toContain("Ответьте на 1 вопрос");
-    expect(container.textContent).toContain("Задача для оператора");
-    expect(container.textContent).toContain("Что сделать:");
-    expect(container.textContent).toContain("Уточнить задачу перед созданием ТЗ");
-    expect(container.textContent).toContain("Форма ответа: 1");
-    expect(container.textContent).not.toContain("Принять финальное ТЗ GER-118");
+    const text = container.textContent ?? "";
+    expect(text).toContain("Ответьте на 1 вопрос");
+    expect(text).toContain("Задача для оператора");
+    expect(text).toContain("Что сделать:");
+    expect(text).toContain("Уточнить задачу перед созданием ТЗ");
+    expect(text).toContain("Форма ответа: 1");
+    expect(text).not.toContain("Принять финальное ТЗ GER-118");
+    expect(text.indexOf("Ответьте на 1 вопрос")).toBeLessThan(
+      text.indexOf("Loads after the initial pending query."),
+    );
   });
 
   it("hides the plan decomposition panel by default", async () => {

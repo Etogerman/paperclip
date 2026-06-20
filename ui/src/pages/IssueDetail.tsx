@@ -1120,11 +1120,11 @@ const PendingOperatorInteractionsPanel = memo(function PendingOperatorInteractio
   return (
     <section
       aria-label="Ожидается ответ оператора"
-      className="space-y-4 border-l-4 border-sky-500 bg-sky-500/5 px-4 py-3"
+      className="space-y-4 border-l-4 border-amber-400 bg-amber-300/15 px-4 py-3 ring-1 ring-amber-400/35"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-sky-900 dark:text-sky-100">
+          <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-amber-950 dark:text-amber-100">
             <AlertTriangle className="h-3.5 w-3.5" />
             Нужно действие от вас
           </div>
@@ -1133,7 +1133,7 @@ const PendingOperatorInteractionsPanel = memo(function PendingOperatorInteractio
           </h2>
           <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
         </div>
-        <span className="rounded-sm border border-sky-500/40 bg-background/70 px-2.5 py-1 text-xs font-medium text-foreground">
+        <span className="rounded-sm border border-amber-400/55 bg-background/80 px-2.5 py-1 text-xs font-medium text-foreground">
           {formatOperatorInteractionCount(interactions.length)}
         </span>
       </div>
@@ -1142,9 +1142,9 @@ const PendingOperatorInteractionsPanel = memo(function PendingOperatorInteractio
         {interactions.map((interaction) => {
           if (interaction.kind === "ask_user_questions") {
             return (
-              <div key={interaction.id} className="space-y-4 rounded-sm border border-sky-500/35 bg-background p-4">
+              <div key={interaction.id} className="space-y-4 rounded-sm border border-amber-400/45 bg-background p-4">
                 <div className="space-y-2">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700 dark:text-sky-200">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-800 dark:text-amber-200">
                     Задача для оператора
                   </div>
                   <h3 className="text-lg font-semibold text-foreground">
@@ -4108,6 +4108,20 @@ export function IssueDetail() {
           className="text-xl font-bold"
         />
 
+        {pendingOperatorInteractions.length > 0 ? (
+          <PendingOperatorInteractionsPanel
+            interactions={pendingOperatorInteractions}
+            agentMap={agentMap}
+            currentUserId={currentUserId}
+            userLabelMap={userLabelMap}
+            onAcceptInteraction={handleAcceptInteraction}
+            onRejectInteraction={handleRejectInteraction}
+            onSubmitInteractionAnswers={handleSubmitInteractionAnswers}
+            onCancelInteraction={handleCancelInteraction}
+            onUploadImage={handleCommentImageUpload}
+          />
+        ) : null}
+
         <InlineEditor
           value={issue.description ?? ""}
           onSave={(description) => updateIssue.mutateAsync({ description })}
@@ -4310,20 +4324,6 @@ export function IssueDetail() {
           </div>
         );
       })()}
-
-      {pendingOperatorInteractions.length > 0 ? (
-        <PendingOperatorInteractionsPanel
-          interactions={pendingOperatorInteractions}
-          agentMap={agentMap}
-          currentUserId={currentUserId}
-          userLabelMap={userLabelMap}
-          onAcceptInteraction={handleAcceptInteraction}
-          onRejectInteraction={handleRejectInteraction}
-          onSubmitInteractionAnswers={handleSubmitInteractionAnswers}
-          onCancelInteraction={handleCancelInteraction}
-          onUploadImage={handleCommentImageUpload}
-        />
-      ) : null}
 
       <Separator />
 
