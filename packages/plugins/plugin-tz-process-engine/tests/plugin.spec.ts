@@ -6,6 +6,8 @@ import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
 import {
   BLIND_DRAFT_ORIGIN_KIND,
+  CONVERGENCE_CHECK_ARTIFACT_KEY,
+  CONVERGENCE_CHECK_ORIGIN_KIND,
   PING_PONG_ARTIFACT_KEY,
   CLARIFICATION_INTERACTION_KEY,
   PING_PONG_ORIGIN_KIND,
@@ -574,6 +576,199 @@ describe("TZ Process Engine plugin", () => {
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
         message: "Ping-pong round 1 запущен: авторы получили черновики друг друга",
+        entityId: rootIssueId,
+      }),
+    ]));
+  });
+
+  it("creates convergence check tasks after both ping-pong round 1 tasks are done", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    const codexAgentId = randomUUID();
+    const claudeAgentId = randomUUID();
+    const codexPingPongIssueId = randomUUID();
+    const claudePingPongIssueId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date().toISOString();
+    const harness = createTestHarness({ manifest });
+    harness.seed({
+      issues: [
+        issue({
+          id: rootIssueId,
+          companyId,
+          title: "GER-118 root task",
+          identifier: "GER-118",
+          projectId: "project-1",
+          status: "in_progress",
+        }),
+        issue({
+          id: codexPingPongIssueId,
+          companyId,
+          title: "GER-118 ping-pong round 1: Автор-Codex отвечает Автор-Claude",
+          identifier: "GER-156",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: codexAgentId,
+          originKind: PING_PONG_ORIGIN_KIND,
+          originId: `${runId}:author-codex:r1`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+        issue({
+          id: claudePingPongIssueId,
+          companyId,
+          title: "GER-118 ping-pong round 1: Автор-Claude отвечает Автор-Codex",
+          identifier: "GER-157",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: claudeAgentId,
+          originKind: PING_PONG_ORIGIN_KIND,
+          originId: `${runId}:author-claude:r1`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+      ],
+      agents: [
+        agent({
+          id: codexAgentId,
+          companyId,
+          name: "Автор-Codex",
+          adapterType: "codex_local",
+        }),
+        agent({
+          id: claudeAgentId,
+          companyId,
+          name: "Автор-Claude",
+          adapterType: "claude_local",
+        }),
+      ],
+    });
+    await plugin.definition.setup(harness.ctx);
+    await harness.ctx.issues.documents.upsert({
+      issueId: codexPingPongIssueId,
+      companyId,
+      key: "pingpong-codex-r1",
+      title: "Ping-pong Автор-Codex R1",
+      body: "Codex ping-pong response with remaining deltas.",
+    });
+    await harness.ctx.issues.documents.upsert({
+      issueId: claudePingPongIssueId,
+      companyId,
+      key: "plan",
+      title: "ТЗ GER-118 — Автор-Claude (пинг-понг раунд 1)",
+      body: "Claude ping-pong response with convergence notes.",
+    });
+
+    const runRow = {
+      id: runId,
+      company_id: companyId,
+      root_issue_id: rootIssueId,
+      process_key: PROCESS_KEY,
+      status: "iterating",
+      state: "ping_pong_round_1_dispatched",
+      current_round: 1,
+      max_rounds: 6,
+      qa_rework_limit: 2,
+      idempotency_key: "tz-cycle:convergence-check-test",
+      operator_input: {
+        task: "Create final TZ",
+        context: "Use existing project code as read-only context.",
+        projectId: "project-1",
+      },
+      selected_agents: {
+        "author-codex": {
+          agentId: codexAgentId,
+          agentName: "Автор-Codex",
+          adapterType: "codex_local",
+          issueId: "codex-draft-issue",
+          issueIdentifier: "GER-149",
+          wakeupRunId: null,
+        },
+        "author-claude": {
+          agentId: claudeAgentId,
+          agentName: "Автор-Claude",
+          adapterType: "claude_local",
+          issueId: "claude-draft-issue",
+          issueIdentifier: "GER-150",
+          wakeupRunId: null,
+        },
+        pingPongRound1: {
+          "author-codex": {
+            agentId: codexAgentId,
+            agentName: "Автор-Codex",
+            adapterType: "codex_local",
+            issueId: codexPingPongIssueId,
+            issueIdentifier: "GER-156",
+            wakeupRunId: null,
+          },
+          "author-claude": {
+            agentId: claudeAgentId,
+            agentName: "Автор-Claude",
+            adapterType: "claude_local",
+            issueId: claudePingPongIssueId,
+            issueIdentifier: "GER-157",
+            wakeupRunId: null,
+          },
+        },
+      },
+      started_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+    const originalQuery = harness.ctx.db.query.bind(harness.ctx.db);
+    harness.ctx.db.query = async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes(".tz_process_runs") && sql.includes("ping_pong_round_1_dispatched")) {
+        return [runRow] as T[];
+      }
+      return originalQuery(sql, params);
+    };
+
+    await harness.emit("issue.updated", {}, {
+      companyId,
+      entityType: "issue",
+      entityId: claudePingPongIssueId,
+      actorType: "agent",
+      actorId: claudeAgentId,
+    });
+
+    const checkIssues = await harness.ctx.issues.list({
+      companyId,
+      originKindPrefix: CONVERGENCE_CHECK_ORIGIN_KIND,
+      includePluginOperations: true,
+      limit: 10,
+    });
+    expect(checkIssues).toHaveLength(2);
+    expect(checkIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: codexAgentId,
+        status: "todo",
+        originKind: CONVERGENCE_CHECK_ORIGIN_KIND,
+        originId: `${runId}:author-codex:r1`,
+      }),
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: claudeAgentId,
+        status: "todo",
+        originKind: CONVERGENCE_CHECK_ORIGIN_KIND,
+        originId: `${runId}:author-claude:r1`,
+      }),
+    ]));
+    const descriptions = checkIssues.map((entry) => entry.description).join("\n");
+    expect(descriptions).toContain("Это проверка схождения после ping-pong round 1");
+    expect(descriptions).toContain("Codex ping-pong response with remaining deltas.");
+    expect(descriptions).toContain("Claude ping-pong response with convergence notes.");
+    expect(descriptions).toContain("verdict: СОШЛИСЬ");
+    expect(descriptions).toContain("remaining_deltas: []");
+    expect(harness.dbExecutes.some((entry) =>
+      entry.sql.includes("state = 'convergence_check_round_1_dispatched'"))).toBe(true);
+    expect(harness.dbExecutes.some((entry) =>
+      entry.sql.includes(".tz_process_artifacts") && entry.params?.includes(CONVERGENCE_CHECK_ARTIFACT_KEY))).toBe(true);
+    expect(harness.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: "Проверка схождения round 1 запущена: авторы должны дать короткий вердикт",
         entityId: rootIssueId,
       }),
     ]));
