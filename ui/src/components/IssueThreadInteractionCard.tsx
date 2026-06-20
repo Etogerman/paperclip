@@ -20,7 +20,7 @@ import {
   type SuggestedTaskDraft,
   type SuggestedTaskTreeNode,
 } from "../lib/issue-thread-interactions";
-import { cn, formatDateTime, formatShortDate } from "../lib/utils";
+import { cn } from "../lib/utils";
 import { MarkdownBody } from "./MarkdownBody";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
@@ -40,6 +40,23 @@ function formatRussianCount(count: number, one: string, few: string, many: strin
 
 function formatQuestionCount(count: number) {
   return formatRussianCount(count, "вопрос", "вопроса", "вопросов");
+}
+
+function formatInteractionDate(date: Date | string) {
+  return new Date(date).toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "short",
+  });
+}
+
+function formatInteractionDateTime(date: Date | string) {
+  return new Date(date).toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 interface IssueThreadInteractionCardProps {
@@ -1933,7 +1950,7 @@ export function IssueThreadInteractionCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className={cn("inline-flex items-center gap-1 rounded-sm border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]", styles.badge)}>
               <StatusIcon className="h-3.5 w-3.5" />
-              {isPlan ? "Plan" : interactionKindLabel(interaction.kind)}
+              {isPlan ? "План" : interactionKindLabel(interaction.kind)}
               <span className="text-current/60">/</span>
               {planStyles ? planStyles.label : statusLabel(interaction.status)}
             </span>
@@ -1942,8 +1959,8 @@ export function IssueThreadInteractionCard({
               <span className="inline-flex items-center gap-1 rounded-sm border border-border/70 bg-transparent px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-foreground/70">
                 <ListChecks className="h-3.5 w-3.5" />
                 {interaction.continuationPolicy === "wake_assignee_on_accept"
-                  ? "Wakes on confirm"
-                  : "Wakes assignee"}
+                  ? "Разбудит после подтверждения"
+                  : "Разбудит исполнителя"}
               </span>
             ) : null}
           </div>
@@ -1970,12 +1987,12 @@ export function IssueThreadInteractionCard({
         <Tooltip>
           <TooltipTrigger asChild>
             <div className="rounded-sm border border-border/70 bg-transparent px-3 py-2 text-right text-xs text-muted-foreground">
-              <div className="font-medium text-foreground">{formatShortDate(interaction.createdAt)}</div>
-              <div>proposed by {createdByLabel}</div>
+              <div className="font-medium text-foreground">{formatInteractionDate(interaction.createdAt)}</div>
+              <div>предложил {createdByLabel}</div>
             </div>
           </TooltipTrigger>
           <TooltipContent side="bottom" className="text-xs">
-            Created {formatDateTime(interaction.createdAt)}
+            Создано {formatInteractionDateTime(interaction.createdAt)}
           </TooltipContent>
         </Tooltip>
       </div>
@@ -2015,8 +2032,8 @@ export function IssueThreadInteractionCard({
 
       {resolvedByLabel ? (
         <div className="mt-4 border-t border-border/60 pt-3 text-xs text-muted-foreground">
-          Resolved by <span className="font-medium text-foreground">{resolvedByLabel}</span>
-          {interaction.resolvedAt ? ` on ${formatShortDate(interaction.resolvedAt)}` : ""}
+          Решил <span className="font-medium text-foreground">{resolvedByLabel}</span>
+          {interaction.resolvedAt ? ` ${formatInteractionDate(interaction.resolvedAt)}` : ""}
         </div>
       ) : null}
     </div>
