@@ -1,6 +1,7 @@
 export const PLUGIN_ID = "paperclipai.plugin-tz-process-engine";
 export const PROCESS_KEY = "tz_creation_cycle";
 export const TRACE_DOCUMENT_KEY = "tz-process-trace";
+export const CLARIFICATION_INTERACTION_KEY = "clarification-r0";
 export const DEFAULT_MAX_ROUNDS = 6;
 export const DEFAULT_QA_REWORK_LIMIT = 2;
 

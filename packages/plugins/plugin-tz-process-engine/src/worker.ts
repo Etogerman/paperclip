@@ -8,6 +8,7 @@ import {
   type PluginPerformActionContext,
 } from "@paperclipai/plugin-sdk";
 import {
+  CLARIFICATION_INTERACTION_KEY,
   DEFAULT_MAX_ROUNDS,
   DEFAULT_QA_REWORK_LIMIT,
   PROCESS_KEY,
@@ -182,21 +183,22 @@ async function appendEvent(
 
 function traceDocumentBody(input: { issueTitle: string; run: TzProcessRunSummary }) {
   return [
-    "# TZ Process Trace",
+    "# Трасса процесса создания ТЗ",
     "",
-    `Issue: ${input.issueTitle}`,
+    `Задача: ${input.issueTitle}`,
     `Run ID: ${input.run.id}`,
-    `Status: ${input.run.status}`,
-    `State: ${input.run.state}`,
-    `Round: ${input.run.currentRound}`,
-    `Max rounds: ${input.run.maxRounds}`,
-    `QA rework limit: ${input.run.qaReworkLimit}`,
+    `Статус: ${input.run.status}`,
+    `Состояние: ${input.run.state}`,
+    `Раунд: ${input.run.currentRound}`,
+    `Лимит раундов: ${input.run.maxRounds}`,
+    `Лимит QA-доработок: ${input.run.qaReworkLimit}`,
     "",
-    "This document is owned by the TZ Process Engine plugin. It records the visible process state; authoritative state lives in the plugin database namespace.",
+    "Этот документ ведёт плагин TZ Process Engine. Видимая трасса хранится здесь, а авторитетное состояние процесса живёт в namespace плагина в Postgres.",
   ].join("\n");
 }
 
 async function writeTraceDocument(ctx: PluginContext, issueId: string, companyId: string, issueTitle: string, run: TzProcessRunSummary) {
+  const existing = await ctx.issues.documents.get(issueId, TRACE_DOCUMENT_KEY, companyId);
   await ctx.issues.documents.upsert({
     issueId,
     companyId,
@@ -205,17 +207,122 @@ async function writeTraceDocument(ctx: PluginContext, issueId: string, companyId
     format: "markdown",
     body: traceDocumentBody({ issueTitle, run }),
     changeSummary: "Recorded TZ process run state",
+    baseRevisionId: existing?.latestRevisionId ?? null,
   });
 }
 
-async function buildStatus(ctx: PluginContext, companyId: string, issueId: string): Promise<TzProcessStatusResult> {
+function clarificationInteractionIdempotencyKey(runId: string) {
+  return `${runId}:${CLARIFICATION_INTERACTION_KEY}`;
+}
+
+async function createClarificationInteraction(ctx: PluginContext, issueId: string, companyId: string, run: TzProcessRunSummary) {
+  return ctx.issues.askUserQuestions(issueId, {
+    idempotencyKey: clarificationInteractionIdempotencyKey(run.id),
+    title: "Уточнить задачу перед созданием ТЗ",
+    summary: "Ответьте один раз. После этого оба автора получат одинаковый пакет уточнений и смогут начинать слепой раунд.",
+    continuationPolicy: "wake_assignee",
+    payload: {
+      version: 1,
+      title: "Уточняющие вопросы для цикла создания ТЗ",
+      submitLabel: "Ответить и продолжить",
+      questions: [
+        {
+          id: "task_ready",
+          prompt: "Описание задачи уже достаточно полное, чтобы авторам начинать черновики ТЗ?",
+          helpText: "Если нужно что-то добавить, выберите второй вариант и впишите детали в поле ответа.",
+          selectionMode: "single",
+          required: true,
+          options: [
+            {
+              id: "ready",
+              label: "Да, можно начинать",
+              description: "Авторы сразу перейдут к слепому раунду после фиксации ответа.",
+            },
+            {
+              id: "needs_details",
+              label: "Нужно уточнить",
+              description: "Добавьте недостающие вводные в свободном тексте ответа.",
+            },
+          ],
+        },
+        {
+          id: "context_sources",
+          prompt: "Какой контекст авторам нужно учитывать перед черновиками?",
+          selectionMode: "multi",
+          required: true,
+          options: [
+            {
+              id: "issue_context",
+              label: "Текущую задачу",
+              description: "Использовать описание, комментарии, документы и текущую историю задачи.",
+            },
+            {
+              id: "code_readonly",
+              label: "Код read-only",
+              description: "Сверять требования с репозиторием без права записи.",
+            },
+            {
+              id: "paperclip_context",
+              label: "Контекст Paperclip",
+              description: "Учитывать текущие сущности Paperclip: issues, documents, interactions, agents.",
+            },
+            {
+              id: "no_extra_context",
+              label: "Без доп. контекста",
+              description: "Достаточно текста задачи.",
+            },
+          ],
+        },
+        {
+          id: "final_tz_focus",
+          prompt: "На что особенно обратить внимание в финальном ТЗ?",
+          selectionMode: "multi",
+          required: true,
+          options: [
+            {
+              id: "acceptance_criteria",
+              label: "Критерии приёмки",
+              description: "Сделать результат проверяемым.",
+            },
+            {
+              id: "risks",
+              label: "Риски и ограничения",
+              description: "Отдельно зафиксировать слабые места и границы MVP.",
+            },
+            {
+              id: "implementation_steps",
+              label: "План реализации",
+              description: "Добавить понятную последовательность работ.",
+            },
+            {
+              id: "questions",
+              label: "Открытые вопросы",
+              description: "Явно вынести всё, что требует решения оператора.",
+            },
+          ],
+        },
+      ],
+    },
+  }, companyId);
+}
+
+async function buildStatus(
+  ctx: PluginContext,
+  companyId: string,
+  issueId: string,
+  knownRun?: TzProcessRunSummary | null,
+): Promise<TzProcessStatusResult> {
   const issue = await ctx.issues.get(issueId, companyId);
   if (!issue) throw new Error(`Issue not found: ${issueId}`);
-  const run = await latestRunForIssue(ctx, companyId, issueId);
-  const pendingInteractions = await ctx.issues.interactions.list(issueId, companyId, {
+  const run = knownRun === undefined ? await latestRunForIssue(ctx, companyId, issueId) : knownRun;
+  const allPendingInteractions = await ctx.issues.interactions.list(issueId, companyId, {
     status: "pending",
     limit: 20,
   });
+  const processInteractionPrefix = run ? `${run.id}:` : null;
+  const pendingInteractions = processInteractionPrefix
+    ? allPendingInteractions.filter((interaction) => interaction.idempotencyKey?.startsWith(processInteractionPrefix))
+    : allPendingInteractions;
   return {
     issueId,
     companyId,
@@ -247,14 +354,16 @@ async function handleStart(ctx: PluginContext, input: StartCycleInput): Promise<
   };
 
   await ctx.db.execute(
-    `INSERT INTO ${tableName(ctx, "tz_process_runs")}
+    `INSERT INTO ${tableName(ctx, "tz_process_runs")} AS runs
        (id, company_id, root_issue_id, process_key, status, state, current_round,
         max_rounds, qa_rework_limit, idempotency_key, operator_input, selected_agents)
-     VALUES ($1, $2, $3, $4, 'intake', 'intake', 0, $5, $6, $7, $8::jsonb, $9::jsonb)
+     VALUES ($1, $2, $3, $4, 'clarifying', 'waiting_operator_clarification', 0, $5, $6, $7, $8::jsonb, $9::jsonb)
      ON CONFLICT (company_id, idempotency_key) DO UPDATE SET
        operator_input = EXCLUDED.operator_input,
        max_rounds = EXCLUDED.max_rounds,
        qa_rework_limit = EXCLUDED.qa_rework_limit,
+       status = CASE WHEN runs.status = 'intake' THEN 'clarifying' ELSE runs.status END,
+       state = CASE WHEN runs.state = 'intake' THEN 'waiting_operator_clarification' ELSE runs.state END,
        updated_at = now()`,
     [
       runId,
@@ -274,8 +383,8 @@ async function handleStart(ctx: PluginContext, input: StartCycleInput): Promise<
     companyId: input.companyId,
     rootIssueId: input.issueId,
     processKey: PROCESS_KEY,
-    status: "intake",
-    state: "intake",
+    status: "clarifying",
+    state: "waiting_operator_clarification",
     currentRound: 0,
     maxRounds,
     qaReworkLimit,
@@ -297,21 +406,33 @@ async function handleStart(ctx: PluginContext, input: StartCycleInput): Promise<
       source: input.source ?? "plugin",
     },
   });
+  const clarificationInteraction = await createClarificationInteraction(ctx, input.issueId, input.companyId, run);
+  await appendEvent(ctx, {
+    runId: run.id,
+    companyId: input.companyId,
+    eventType: "clarification_requested",
+    payload: {
+      issueId: input.issueId,
+      interactionId: clarificationInteraction.id,
+      idempotencyKey: clarificationInteraction.idempotencyKey ?? clarificationInteractionIdempotencyKey(run.id),
+    },
+  });
 
   await writeTraceDocument(ctx, input.issueId, input.companyId, issue.title, run);
   await ctx.activity.log({
     companyId: input.companyId,
-    message: "TZ creation process started",
+    message: "Процесс создания ТЗ ожидает уточнений оператора",
     entityType: "issue",
     entityId: input.issueId,
     metadata: {
       runId: run.id,
       processKey: PROCESS_KEY,
       state: run.state,
+      interactionId: clarificationInteraction.id,
     },
   });
 
-  const status = await buildStatus(ctx, input.companyId, input.issueId);
+  const status = await buildStatus(ctx, input.companyId, input.issueId, run);
   return {
     ...status,
     run: status.run ?? run,
@@ -337,6 +458,43 @@ async function recordInteractionResolution(ctx: PluginContext, event: PluginEven
       rawEventType: event.eventType,
     },
   });
+
+  const interactionId = stringField(payload.interactionId);
+  if (event.eventType !== "issue.thread_interaction.answered" || !interactionId) return;
+
+  const interaction = await ctx.issues.interactions.get(interactionId, event.companyId);
+  if (interaction?.idempotencyKey !== clarificationInteractionIdempotencyKey(run.id)) return;
+
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'drafting',
+            state = 'ready_for_blind_drafting',
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'clarifying'`,
+    [run.id, event.companyId],
+  );
+  await appendEvent(ctx, {
+    runId: run.id,
+    companyId: event.companyId,
+    eventType: "clarification_answered",
+    payload: {
+      issueId,
+      interactionId,
+      result: interaction.result ?? null,
+    },
+  });
+
+  const issue = await ctx.issues.get(issueId, event.companyId);
+  if (issue) {
+    await writeTraceDocument(ctx, issueId, event.companyId, issue.title, {
+      ...run,
+      status: "drafting",
+      state: "ready_for_blind_drafting",
+      updatedAt: new Date().toISOString(),
+    });
+  }
 }
 
 function readStartInput(

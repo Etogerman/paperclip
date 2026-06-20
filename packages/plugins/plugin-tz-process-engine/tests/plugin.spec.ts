@@ -4,7 +4,7 @@ import { pluginManifestV1Schema, type Issue } from "@paperclipai/shared";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
-import { PROCESS_KEY, TRACE_DOCUMENT_KEY } from "../src/constants.js";
+import { CLARIFICATION_INTERACTION_KEY, PROCESS_KEY, TRACE_DOCUMENT_KEY } from "../src/constants.js";
 
 function issue(input: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
   const now = new Date();
@@ -74,7 +74,7 @@ describe("TZ Process Engine plugin", () => {
     });
   });
 
-  it("starts a process run, writes trace state, and reads pending operator interactions", async () => {
+  it("starts a process run, asks operator clarifying questions, and writes trace state", async () => {
     const companyId = randomUUID();
     const issueId = randomUUID();
     const harness = createTestHarness({ manifest });
@@ -87,14 +87,15 @@ describe("TZ Process Engine plugin", () => {
         }),
       ],
     });
-    const interaction = await harness.ctx.issues.requestConfirmation(
+    await harness.ctx.issues.requestConfirmation(
       issueId,
       {
-        title: "Confirm scope",
+        title: "Old unrelated confirmation",
+        idempotencyKey: "old-confirmation",
         continuationPolicy: "none",
         payload: {
           version: 1,
-          prompt: "Use GPT and Claude?",
+          prompt: "Use an old flow?",
           allowDeclineReason: true,
         },
       },
@@ -104,8 +105,8 @@ describe("TZ Process Engine plugin", () => {
     await plugin.definition.setup(harness.ctx);
 
     const result = await harness.performAction<{
-      run: { id: string; status: string; processKey: string; maxRounds: number } | null;
-      pendingInteractions: Array<{ id: string; kind: string }>;
+      run: { id: string; status: string; state: string; processKey: string; maxRounds: number } | null;
+      pendingInteractions: Array<{ id: string; kind: string; title: string | null }>;
     }>("start-cycle", {
       companyId,
       issueId,
@@ -115,26 +116,42 @@ describe("TZ Process Engine plugin", () => {
     });
 
     expect(result.run).toMatchObject({
-      status: "intake",
+      status: "clarifying",
+      state: "waiting_operator_clarification",
       processKey: PROCESS_KEY,
       maxRounds: 6,
     });
     expect(result.pendingInteractions).toEqual([
       expect.objectContaining({
-        id: interaction.id,
-        kind: "request_confirmation",
+        kind: "ask_user_questions",
+        title: "Уточнить задачу перед созданием ТЗ",
       }),
     ]);
+    expect(result.pendingInteractions[0]?.id).toBeTruthy();
     expect(harness.dbExecutes.some((entry) => entry.sql.includes(".tz_process_runs"))).toBe(true);
     expect(harness.dbExecutes.some((entry) => entry.sql.includes(".tz_process_events"))).toBe(true);
     expect(harness.dbQueries.some((entry) => entry.sql.includes(".tz_process_runs"))).toBe(true);
     expect(harness.activity).toEqual([
       expect.objectContaining({
-        message: "TZ creation process started",
+        message: "Процесс создания ТЗ ожидает уточнений оператора",
         entityType: "issue",
         entityId: issueId,
       }),
     ]);
+    const interactions = await harness.ctx.issues.interactions.list(issueId, companyId, { status: "pending" });
+    const clarification = interactions.find((entry) => entry.kind === "ask_user_questions");
+    expect(clarification).toMatchObject({
+      kind: "ask_user_questions",
+      idempotencyKey: `${result.run?.id}:${CLARIFICATION_INTERACTION_KEY}`,
+      payload: expect.objectContaining({
+        title: "Уточняющие вопросы для цикла создания ТЗ",
+        questions: expect.arrayContaining([
+          expect.objectContaining({ id: "task_ready" }),
+          expect.objectContaining({ id: "context_sources" }),
+          expect.objectContaining({ id: "final_tz_focus" }),
+        ]),
+      }),
+    });
 
     const docs = await harness.ctx.issues.documents.list(issueId, companyId);
     expect(docs).toEqual([
@@ -180,7 +197,7 @@ describe("TZ Process Engine plugin", () => {
       status: 201,
       body: {
         run: expect.objectContaining({
-          status: "intake",
+          status: "clarifying",
           processKey: PROCESS_KEY,
         }),
       },

@@ -1170,6 +1170,7 @@ export interface WorkerToHostMethods {
       title?: string;
       format?: string;
       changeSummary?: string;
+      baseRevisionId?: string | null;
     },
     result: IssueDocument,
   ];
