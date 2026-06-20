@@ -23,8 +23,10 @@ import {
   PING_PONG_ARTIFACT_KEY,
   PING_PONG_ORIGIN_KIND,
   PROCESS_KEY,
+  PROJECT_REPO_FOLDER_KEY,
   QA_REVIEW_ARTIFACT_KEY,
   QA_REVIEW_ORIGIN_KIND,
+  READINESS_REPORT_DOCUMENT_KEY,
   SYNTHESIS_ARTIFACT_KEY,
   SYNTHESIS_ORIGIN_KIND,
   TRACE_DOCUMENT_KEY,
@@ -213,11 +215,82 @@ type StartCycleInput = {
   source?: string | null;
 };
 
+type FactPredicate =
+  | {
+      kind: "file_exists";
+      path: string;
+    }
+  | {
+      kind: "text_search";
+      text: string;
+      paths?: string[];
+    }
+  | {
+      kind: "regex_search";
+      pattern: string;
+      flags?: string;
+      paths?: string[];
+    };
+
+type FactCheckDefinition = {
+  claimKey: string;
+  claim: string;
+  predicate: FactPredicate;
+};
+
+type FactCheckStatus = "confirmed" | "missing" | "error";
+
+type FactCheckResult = FactCheckDefinition & {
+  commandLabel: string;
+  status: FactCheckStatus;
+  evidence: {
+    output: string;
+    matches: Array<{
+      path: string;
+      line?: number;
+      snippet?: string;
+    }>;
+    error?: string;
+  };
+};
+
+type ReadinessCheckInput = {
+  companyId: string;
+  issueId: string;
+  folderKey?: string | null;
+  checks?: unknown;
+};
+
+type ReadinessCheckResult = {
+  issueId: string;
+  companyId: string;
+  runId: string | null;
+  inventoryId: string;
+  readinessGateId: string;
+  status: "ready" | "blocked";
+  folderKey: string;
+  fileCount: number;
+  truncated: boolean;
+  checks: FactCheckResult[];
+  blockingCount: number;
+  reportDocumentKey: string;
+};
+
 let activeContext: PluginContext | null = null;
 let startCycle: ((input: StartCycleInput) => Promise<TzProcessStatusResult>) | null = null;
 let readStatus: ((companyId: string, issueId: string) => Promise<TzProcessStatusResult>) | null = null;
+let runReadinessCheck: ((input: ReadinessCheckInput) => Promise<ReadinessCheckResult>) | null = null;
 
-function tableName(ctx: PluginContext, table: "tz_process_runs" | "tz_process_events" | "tz_process_artifacts") {
+function tableName(
+  ctx: PluginContext,
+  table:
+    | "tz_process_runs"
+    | "tz_process_events"
+    | "tz_process_artifacts"
+    | "tz_repo_inventories"
+    | "tz_fact_checks"
+    | "tz_readiness_gates",
+) {
   return `${ctx.db.namespace}.${table}`;
 }
 
@@ -240,12 +313,253 @@ function jsonArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+const DEFAULT_READINESS_CHECKS: FactCheckDefinition[] = [
+  {
+    claimKey: "actor-context-class",
+    claim: "`ActorContext` существует в коде",
+    predicate: { kind: "text_search", text: "class ActorContext", paths: ["app", "src", "tests", "database"] },
+  },
+  {
+    claimKey: "access-decision-service-class",
+    claim: "`AccessDecisionService` существует в коде",
+    predicate: { kind: "text_search", text: "class AccessDecisionService", paths: ["app", "src", "tests", "database"] },
+  },
+  {
+    claimKey: "audit-events-storage",
+    claim: "`audit_events` storage существует или создаётся миграцией",
+    predicate: { kind: "regex_search", pattern: "audit_events|Schema::create\\(['\\\"]audit_events", paths: ["app", "src", "tests", "database"] },
+  },
+  {
+    claimKey: "mutation-audit-recorder-class",
+    claim: "`MutationAuditRecorder` существует в коде",
+    predicate: { kind: "text_search", text: "class MutationAuditRecorder", paths: ["app", "src", "tests", "database"] },
+  },
+  {
+    claimKey: "store-inbound-message-action-class",
+    claim: "`StoreInboundMessageAction` существует как covered flow",
+    predicate: { kind: "text_search", text: "class StoreInboundMessageAction", paths: ["app", "src", "tests"] },
+  },
+  {
+    claimKey: "bitrix-runtime-callback-action-class",
+    claim: "`HandleBitrix24RuntimeCallbackAction` существует как covered flow",
+    predicate: { kind: "text_search", text: "class HandleBitrix24RuntimeCallbackAction", paths: ["app", "src", "tests"] },
+  },
+  {
+    claimKey: "process-scenario-start-job-class",
+    claim: "`ProcessScenarioStartJob` существует как internal queue/service path",
+    predicate: { kind: "text_search", text: "class ProcessScenarioStartJob", paths: ["app", "src", "tests"] },
+  },
+];
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".php",
+  ".blade.php",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".sql",
+  ".json",
+  ".md",
+  ".txt",
+  ".yaml",
+  ".yml",
+  ".xml",
+  ".env.example",
+]);
+
 function agentIsUsable(agent: Agent) {
   return agent.status !== "terminated" && agent.status !== "paused" && agent.status !== "pending_approval";
 }
 
 function normalizeAgentName(value: string) {
   return value.trim().toLowerCase();
+}
+
+function normalizeRepoPath(value: string) {
+  return value.split(/[\\/]+/).filter(Boolean).join("/");
+}
+
+function fileExtension(path: string) {
+  const normalized = normalizeRepoPath(path).toLowerCase();
+  if (normalized.endsWith(".blade.php")) return ".blade.php";
+  if (normalized.endsWith(".env.example")) return ".env.example";
+  const dot = normalized.lastIndexOf(".");
+  return dot >= 0 ? normalized.slice(dot) : "";
+}
+
+function isTextRepoFile(path: string) {
+  const normalized = normalizeRepoPath(path);
+  if (normalized.includes("/vendor/") || normalized.startsWith("vendor/")) return false;
+  if (normalized.includes("/node_modules/") || normalized.startsWith("node_modules/")) return false;
+  if (normalized.includes("/.git/") || normalized.startsWith(".git/")) return false;
+  return TEXT_FILE_EXTENSIONS.has(fileExtension(normalized));
+}
+
+function pathMatchesScope(path: string, scopes: string[] | undefined) {
+  if (!scopes || scopes.length === 0) return true;
+  const normalized = normalizeRepoPath(path);
+  return scopes.some((scope) => {
+    const normalizedScope = normalizeRepoPath(scope);
+    if (!normalizedScope) return true;
+    if (normalized === normalizedScope) return true;
+    return normalized.startsWith(`${normalizedScope}/`);
+  });
+}
+
+function parseFactPredicate(value: unknown): FactPredicate | null {
+  const object = jsonObject(value);
+  const kind = stringField(object.kind);
+
+  if (kind === "file_exists") {
+    const path = stringField(object.path);
+    return path ? { kind, path: normalizeRepoPath(path) } : null;
+  }
+
+  if (kind === "text_search") {
+    const text = typeof object.text === "string" ? object.text : "";
+    if (!text) return null;
+    const paths = jsonArray(object.paths).map((entry) => stringField(entry)).filter((entry): entry is string => Boolean(entry));
+    return { kind, text, paths: paths.length > 0 ? paths : undefined };
+  }
+
+  if (kind === "regex_search") {
+    const pattern = typeof object.pattern === "string" ? object.pattern : "";
+    if (!pattern) return null;
+    const flags = stringField(object.flags) ?? undefined;
+    const paths = jsonArray(object.paths).map((entry) => stringField(entry)).filter((entry): entry is string => Boolean(entry));
+    return { kind, pattern, flags, paths: paths.length > 0 ? paths : undefined };
+  }
+
+  return null;
+}
+
+function parseFactChecks(value: unknown): FactCheckDefinition[] {
+  const entries = jsonArray(value);
+  if (entries.length === 0) return DEFAULT_READINESS_CHECKS;
+
+  const parsed = entries.flatMap((entry) => {
+    const object = jsonObject(entry);
+    const claimKey = stringField(object.claimKey) ?? stringField(object.claim_key);
+    const claim = stringField(object.claim);
+    const predicate = parseFactPredicate(object.predicate);
+    if (!claimKey || !claim || !predicate) return [];
+    return [{ claimKey, claim, predicate }];
+  });
+
+  return parsed.length > 0 ? parsed : DEFAULT_READINESS_CHECKS;
+}
+
+function factCommandLabel(check: FactCheckDefinition) {
+  if (check.predicate.kind === "file_exists") {
+    return `file_exists ${check.predicate.path}`;
+  }
+
+  if (check.predicate.kind === "text_search") {
+    const scope = check.predicate.paths?.join(",") ?? "repo";
+    return `text_search ${JSON.stringify(check.predicate.text)} in ${scope}`;
+  }
+
+  const scope = check.predicate.paths?.join(",") ?? "repo";
+  return `regex_search /${check.predicate.pattern}/${check.predicate.flags ?? ""} in ${scope}`;
+}
+
+function lineSnippet(line: string) {
+  return line.trim().replace(/\s+/g, " ").slice(0, 240);
+}
+
+function checkPathExists(files: string[], check: FactCheckDefinition): FactCheckResult {
+  if (check.predicate.kind !== "file_exists") {
+    throw new Error("checkPathExists requires file_exists predicate");
+  }
+
+  const target = normalizeRepoPath(check.predicate.path);
+  const found = files.includes(target);
+  return {
+    ...check,
+    commandLabel: factCommandLabel(check),
+    status: found ? "confirmed" : "missing",
+    evidence: {
+      output: found ? target : "0 matches",
+      matches: found ? [{ path: target }] : [],
+    },
+  };
+}
+
+async function checkTextSearch(
+  ctx: PluginContext,
+  input: {
+    companyId: string;
+    folderKey: string;
+    files: string[];
+    check: FactCheckDefinition;
+  },
+): Promise<FactCheckResult> {
+  const predicate = input.check.predicate;
+  if (predicate.kind !== "text_search" && predicate.kind !== "regex_search") {
+    throw new Error("checkTextSearch requires text or regex predicate");
+  }
+
+  const matches: FactCheckResult["evidence"]["matches"] = [];
+  let regex: RegExp | null = null;
+  if (predicate.kind === "regex_search") {
+    try {
+      regex = new RegExp(predicate.pattern, predicate.flags);
+    } catch (err) {
+      return {
+        ...input.check,
+        commandLabel: factCommandLabel(input.check),
+        status: "error",
+        evidence: {
+          output: "invalid regex",
+          matches: [],
+          error: err instanceof Error ? err.message : String(err),
+        },
+      };
+    }
+  }
+
+  for (const file of input.files) {
+    if (!pathMatchesScope(file, predicate.paths)) continue;
+    if (!isTextRepoFile(file)) continue;
+
+    let contents = "";
+    try {
+      contents = await ctx.localFolders.readText(input.companyId, input.folderKey, file);
+    } catch {
+      continue;
+    }
+
+    const lines = contents.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      const isMatch = predicate.kind === "text_search"
+        ? line.includes(predicate.text)
+        : Boolean(regex?.test(line));
+      if (!isMatch) continue;
+      matches.push({
+        path: file,
+        line: index + 1,
+        snippet: lineSnippet(line),
+      });
+      if (matches.length >= 20) break;
+    }
+    if (matches.length >= 20) break;
+  }
+
+  return {
+    ...input.check,
+    commandLabel: factCommandLabel(input.check),
+    status: matches.length > 0 ? "confirmed" : "missing",
+    evidence: {
+      output: matches.length > 0
+        ? matches.map((match) => `${match.path}${match.line ? `:${match.line}` : ""}: ${match.snippet ?? ""}`).join("\n")
+        : "0 matches",
+      matches,
+    },
+  };
 }
 
 function selectAuthorAgent(agents: Agent[], definition: DraftAuthorDefinition): Agent | null {
@@ -1596,6 +1910,195 @@ async function writeTraceDocument(ctx: PluginContext, issueId: string, companyId
     changeSummary: "Recorded TZ process run state",
     baseRevisionId: existing?.latestRevisionId ?? null,
   });
+}
+
+function readinessReportBody(input: {
+  issue: Issue;
+  result: ReadinessCheckResult;
+}) {
+  const checkRows = input.result.checks.map((check) => [
+    "|",
+    check.status,
+    "|",
+    check.claimKey,
+    "|",
+    check.claim.replaceAll("|", "\\|"),
+    "|",
+    check.commandLabel.replaceAll("|", "\\|"),
+    "|",
+    check.evidence.output.replaceAll("\n", "<br>").replaceAll("|", "\\|"),
+    "|",
+  ].join(" "));
+
+  return [
+    "# Repo Inventory / Fact Ledger",
+    "",
+    `Задача: ${input.issue.identifier ?? input.issue.title}`,
+    `Статус readiness: ${input.result.status}`,
+    `Inventory ID: ${input.result.inventoryId}`,
+    `Readiness Gate ID: ${input.result.readinessGateId}`,
+    `Папка проекта: ${input.result.folderKey}`,
+    `Файлов проверено: ${input.result.fileCount}${input.result.truncated ? " (список усечён)" : ""}`,
+    `Блокирующих фактов: ${input.result.blockingCount}`,
+    "",
+    "Правило: `confirmed` ставит только код после чтения файлов из настроенной read-only папки проекта. Агент может предложить предикат, но не подтверждает факт словом.",
+    "",
+    "| Статус | Claim key | Утверждение | Check | Реальный вывод |",
+    "|---|---|---|---|---|",
+    ...checkRows,
+  ].join("\n");
+}
+
+async function writeReadinessReportDocument(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    result: ReadinessCheckResult;
+  },
+) {
+  const existing = await ctx.issues.documents.get(input.issue.id, READINESS_REPORT_DOCUMENT_KEY, input.issue.companyId);
+  await ctx.issues.documents.upsert({
+    issueId: input.issue.id,
+    companyId: input.issue.companyId,
+    key: READINESS_REPORT_DOCUMENT_KEY,
+    title: "Repo Inventory / Fact Ledger",
+    format: "markdown",
+    body: readinessReportBody(input),
+    changeSummary: "Updated code-enforced readiness checks",
+    baseRevisionId: existing?.latestRevisionId ?? null,
+  });
+}
+
+async function recordReadinessResult(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary | null;
+    folderKey: string;
+    folderPath: string | null;
+    fileCount: number;
+    truncated: boolean;
+    checks: FactCheckResult[];
+  },
+): Promise<ReadinessCheckResult> {
+  const inventoryId = randomUUID();
+  const readinessGateId = randomUUID();
+  const blockingChecks = input.checks.filter((check) => check.status !== "confirmed");
+  const status: ReadinessCheckResult["status"] = blockingChecks.length === 0 ? "ready" : "blocked";
+
+  await ctx.db.execute(
+    `INSERT INTO ${tableName(ctx, "tz_repo_inventories")}
+       (id, company_id, root_issue_id, run_id, folder_key, status, repo_path, file_count, truncated, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
+    [
+      inventoryId,
+      input.issue.companyId,
+      input.issue.id,
+      input.run?.id ?? null,
+      input.folderKey,
+      "completed",
+      input.folderPath,
+      input.fileCount,
+      input.truncated,
+      JSON.stringify({
+        source: "localFolders",
+        reportDocumentKey: READINESS_REPORT_DOCUMENT_KEY,
+      }),
+    ],
+  );
+
+  for (const check of input.checks) {
+    await ctx.db.execute(
+      `INSERT INTO ${tableName(ctx, "tz_fact_checks")}
+         (id, inventory_id, company_id, root_issue_id, run_id, claim_key, claim, predicate, command_label, status, evidence)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb)`,
+      [
+        randomUUID(),
+        inventoryId,
+        input.issue.companyId,
+        input.issue.id,
+        input.run?.id ?? null,
+        check.claimKey,
+        check.claim,
+        JSON.stringify(check.predicate),
+        check.commandLabel,
+        check.status,
+        JSON.stringify(check.evidence),
+      ],
+    );
+  }
+
+  const summary = status === "ready"
+    ? "Все проверяемые факты подтверждены кодом."
+    : `Readiness заблокирован: ${blockingChecks.length} факт(ов) не подтверждены кодом.`;
+
+  await ctx.db.execute(
+    `INSERT INTO ${tableName(ctx, "tz_readiness_gates")}
+       (id, inventory_id, company_id, root_issue_id, run_id, status, blocking_count, summary, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+    [
+      readinessGateId,
+      inventoryId,
+      input.issue.companyId,
+      input.issue.id,
+      input.run?.id ?? null,
+      status,
+      blockingChecks.length,
+      summary,
+      JSON.stringify({
+        blockingClaimKeys: blockingChecks.map((check) => check.claimKey),
+      }),
+    ],
+  );
+
+  const result: ReadinessCheckResult = {
+    issueId: input.issue.id,
+    companyId: input.issue.companyId,
+    runId: input.run?.id ?? null,
+    inventoryId,
+    readinessGateId,
+    status,
+    folderKey: input.folderKey,
+    fileCount: input.fileCount,
+    truncated: input.truncated,
+    checks: input.checks,
+    blockingCount: blockingChecks.length,
+    reportDocumentKey: READINESS_REPORT_DOCUMENT_KEY,
+  };
+
+  await writeReadinessReportDocument(ctx, { issue: input.issue, result });
+  await ctx.activity.log({
+    companyId: input.issue.companyId,
+    message: status === "ready"
+      ? "Repo Inventory / Fact Ledger подтверждён кодом"
+      : "Repo Inventory / Fact Ledger заблокировал readiness",
+    entityType: "issue",
+    entityId: input.issue.id,
+    metadata: {
+      inventoryId,
+      readinessGateId,
+      status,
+      blockingCount: blockingChecks.length,
+      reportDocumentKey: READINESS_REPORT_DOCUMENT_KEY,
+    },
+  });
+
+  if (input.run) {
+    await appendEvent(ctx, {
+      runId: input.run.id,
+      companyId: input.issue.companyId,
+      eventType: "repo_fact_readiness_checked",
+      payload: {
+        issueId: input.issue.id,
+        inventoryId,
+        readinessGateId,
+        status,
+        blockingCount: blockingChecks.length,
+      },
+    });
+  }
+
+  return result;
 }
 
 function clarificationInteractionIdempotencyKey(runId: string) {
@@ -3758,6 +4261,104 @@ async function dispatchConvergenceDecisionIfReady(ctx: PluginContext, run: TzPro
   });
 }
 
+async function collectRepoFiles(ctx: PluginContext, companyId: string, folderKey: string) {
+  const listing = await ctx.localFolders.list(companyId, folderKey, {
+    recursive: true,
+    maxEntries: 5_000,
+  });
+  const files = listing.entries
+    .filter((entry) => entry.kind === "file")
+    .map((entry) => normalizeRepoPath(entry.path))
+    .sort((a, b) => a.localeCompare(b));
+  return {
+    files,
+    truncated: listing.truncated,
+  };
+}
+
+async function executeFactCheck(
+  ctx: PluginContext,
+  input: {
+    companyId: string;
+    folderKey: string;
+    files: string[];
+    check: FactCheckDefinition;
+  },
+): Promise<FactCheckResult> {
+  try {
+    if (input.check.predicate.kind === "file_exists") {
+      return checkPathExists(input.files, input.check);
+    }
+
+    return await checkTextSearch(ctx, input);
+  } catch (err) {
+    return {
+      ...input.check,
+      commandLabel: factCommandLabel(input.check),
+      status: "error",
+      evidence: {
+        output: "check failed",
+        matches: [],
+        error: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+}
+
+async function handleReadinessCheck(ctx: PluginContext, input: ReadinessCheckInput): Promise<ReadinessCheckResult> {
+  const issue = await ctx.issues.get(input.issueId, input.companyId);
+  if (!issue) throw new Error(`Issue not found: ${input.issueId}`);
+
+  const folderKey = input.folderKey ?? PROJECT_REPO_FOLDER_KEY;
+  const run = await latestRunForIssue(ctx, input.companyId, input.issueId);
+  const folderStatus = await ctx.localFolders.status(input.companyId, folderKey);
+  if (!folderStatus.configured || !folderStatus.healthy || !folderStatus.readable) {
+    const missingFolderCheck: FactCheckResult = {
+      claimKey: "project-repo-folder-configured",
+      claim: "Read-only папка проекта настроена для Repo Inventory / Fact Ledger",
+      predicate: { kind: "file_exists", path: "." },
+      commandLabel: `local_folder_status ${folderKey}`,
+      status: "missing",
+      evidence: {
+        output: folderStatus.problems.map((problem) => problem.message).join("\n") || "Local folder is not configured",
+        matches: [],
+      },
+    };
+    return recordReadinessResult(ctx, {
+      issue,
+      run,
+      folderKey,
+      folderPath: folderStatus.path,
+      fileCount: 0,
+      truncated: false,
+      checks: [missingFolderCheck],
+    });
+  }
+
+  const { files, truncated } = await collectRepoFiles(ctx, input.companyId, folderKey);
+  const checks = parseFactChecks(input.checks);
+  const results: FactCheckResult[] = [];
+
+  for (const check of checks) {
+    results.push(await executeFactCheck(ctx, {
+      companyId: input.companyId,
+      folderKey,
+      files,
+      check,
+    }));
+  }
+
+  return recordReadinessResult(ctx, {
+    issue,
+    run,
+    folderKey,
+    folderPath: folderStatus.path,
+    fileCount: files.length,
+    truncated,
+    checks: results,
+  });
+}
+
 async function buildStatus(
   ctx: PluginContext,
   companyId: string,
@@ -4224,12 +4825,28 @@ function readStartInput(
   };
 }
 
+function readReadinessInput(
+  params: Record<string, unknown>,
+  context?: PluginPerformActionContext,
+): ReadinessCheckInput {
+  const companyId = stringField(params.companyId) ?? context?.companyId ?? null;
+  const issueId = stringField(params.issueId);
+  if (!companyId || !issueId) throw new Error("companyId and issueId are required");
+  return {
+    companyId,
+    issueId,
+    folderKey: stringField(params.folderKey),
+    checks: params.checks,
+  };
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     activeContext = ctx;
 
     startCycle = async (input) => handleStart(ctx, input);
     readStatus = async (companyId, issueId) => buildStatus(ctx, companyId, issueId);
+    runReadinessCheck = async (input) => handleReadinessCheck(ctx, input);
 
     for (const eventName of [
       "issue.thread_interaction.accepted",
@@ -4265,6 +4882,10 @@ const plugin = definePlugin({
       return buildStatus(ctx, companyId, issueId);
     });
 
+    ctx.actions.register("run-readiness-check", async (params, context) => {
+      return handleReadinessCheck(ctx, readReadinessInput(params, context));
+    });
+
     await resumeReadyDraftingRuns(ctx);
     await resumeReadyPingPongRuns(ctx);
     await resumeReadyConvergenceCheckRuns(ctx);
@@ -4274,7 +4895,7 @@ const plugin = definePlugin({
   },
 
   async onApiRequest(input: PluginApiRequestInput) {
-    if (!activeContext || !startCycle || !readStatus) {
+    if (!activeContext || !startCycle || !readStatus || !runReadinessCheck) {
       throw new Error("TZ Process Engine is not ready");
     }
 
@@ -4296,6 +4917,20 @@ const plugin = definePlugin({
     if (input.routeKey === "status") {
       return {
         body: await readStatus(input.companyId, input.params.issueId),
+      };
+    }
+
+    if (input.routeKey === "run-readiness-check") {
+      const body = jsonObject(input.body);
+      return {
+        status: 201,
+        body: await runReadinessCheck({
+          ...readReadinessInput({
+            ...body,
+            companyId: input.companyId,
+            issueId: input.params.issueId,
+          }),
+        }),
       };
     }
 

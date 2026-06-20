@@ -12,8 +12,10 @@ import {
   CLARIFICATION_INTERACTION_KEY,
   PING_PONG_ORIGIN_KIND,
   PROCESS_KEY,
+  PROJECT_REPO_FOLDER_KEY,
   QA_REVIEW_ARTIFACT_KEY,
   QA_REVIEW_ORIGIN_KIND,
+  READINESS_REPORT_DOCUMENT_KEY,
   SYNTHESIS_ARTIFACT_KEY,
   SYNTHESIS_ORIGIN_KIND,
   TRACE_DOCUMENT_KEY,
@@ -102,12 +104,19 @@ describe("TZ Process Engine plugin", () => {
         "database.namespace.migrate",
         "database.namespace.read",
         "database.namespace.write",
+        "local.folders",
         "issues.create",
         "issues.wakeup",
         "issue.interactions.read",
         "issue.interactions.create",
         "agent.sessions.send",
       ]),
+      localFolders: [
+        expect.objectContaining({
+          folderKey: PROJECT_REPO_FOLDER_KEY,
+          access: "read",
+        }),
+      ],
       database: {
         namespaceSlug: "tz_process_engine",
         migrationsDir: "migrations",
@@ -115,6 +124,7 @@ describe("TZ Process Engine plugin", () => {
       apiRoutes: [
         expect.objectContaining({ routeKey: "start-cycle" }),
         expect.objectContaining({ routeKey: "status" }),
+        expect.objectContaining({ routeKey: "run-readiness-check" }),
       ],
     });
   });
@@ -247,6 +257,157 @@ describe("TZ Process Engine plugin", () => {
         }),
       },
     });
+  });
+
+  it("runs code-enforced Repo Inventory and Fact Ledger checks from a configured project folder", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const harness = createTestHarness({ manifest });
+    harness.seed({
+      issues: [
+        issue({
+          id: issueId,
+          companyId,
+          title: "Audit foundation TZ",
+        }),
+      ],
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    await harness.ctx.localFolders.configure({
+      companyId,
+      folderKey: PROJECT_REPO_FOLDER_KEY,
+      path: "memory://project-1",
+      access: "readWrite",
+    });
+    await harness.ctx.localFolders.writeTextAtomic(
+      companyId,
+      PROJECT_REPO_FOLDER_KEY,
+      "app/Services/Bots/StoreInboundMessageAction.php",
+      "<?php\nclass StoreInboundMessageAction {}\n",
+    );
+    await harness.ctx.localFolders.writeTextAtomic(
+      companyId,
+      PROJECT_REPO_FOLDER_KEY,
+      "database/migrations/2026_01_01_000000_create_audit_events_table.php",
+      "<?php\nSchema::create('audit_events', function () {});\n",
+    );
+
+    const result = await harness.performAction<{
+      status: string;
+      blockingCount: number;
+      fileCount: number;
+      reportDocumentKey: string;
+      checks: Array<{ claimKey: string; status: string; evidence: { output: string } }>;
+    }>("run-readiness-check", {
+      companyId,
+      issueId,
+      checks: [
+        {
+          claimKey: "store-inbound-message-action-class",
+          claim: "`StoreInboundMessageAction` существует",
+          predicate: {
+            kind: "text_search",
+            text: "class StoreInboundMessageAction",
+            paths: ["app"],
+          },
+        },
+        {
+          claimKey: "actor-context-class",
+          claim: "`ActorContext` существует",
+          predicate: {
+            kind: "text_search",
+            text: "class ActorContext",
+            paths: ["app"],
+          },
+        },
+        {
+          claimKey: "audit-events-storage",
+          claim: "`audit_events` storage существует",
+          predicate: {
+            kind: "regex_search",
+            pattern: "audit_events|Schema::create\\(['\\\"]audit_events",
+            paths: ["database"],
+          },
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      blockingCount: 1,
+      fileCount: 2,
+      reportDocumentKey: READINESS_REPORT_DOCUMENT_KEY,
+    });
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        claimKey: "store-inbound-message-action-class",
+        status: "confirmed",
+        evidence: expect.objectContaining({
+          output: expect.stringContaining("app/Services/Bots/StoreInboundMessageAction.php:2"),
+        }),
+      }),
+      expect.objectContaining({
+        claimKey: "audit-events-storage",
+        status: "confirmed",
+      }),
+      expect.objectContaining({
+        claimKey: "actor-context-class",
+        status: "missing",
+        evidence: expect.objectContaining({
+          output: "0 matches",
+        }),
+      }),
+    ]));
+    expect(harness.dbExecutes.some((entry) => entry.sql.includes(".tz_repo_inventories"))).toBe(true);
+    expect(harness.dbExecutes.some((entry) => entry.sql.includes(".tz_fact_checks"))).toBe(true);
+    expect(harness.dbExecutes.some((entry) => entry.sql.includes(".tz_readiness_gates"))).toBe(true);
+
+    const report = await harness.ctx.issues.documents.get(issueId, READINESS_REPORT_DOCUMENT_KEY, companyId);
+    expect(report?.body).toContain("Repo Inventory / Fact Ledger");
+    expect(report?.body).toContain("actor-context-class");
+    expect(report?.body).toContain("missing");
+  });
+
+  it("blocks readiness when the project repository folder is not configured", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const harness = createTestHarness({ manifest });
+    harness.seed({
+      issues: [
+        issue({
+          id: issueId,
+          companyId,
+          title: "Missing repo folder",
+        }),
+      ],
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    const result = await harness.performAction<{
+      status: string;
+      blockingCount: number;
+      fileCount: number;
+      checks: Array<{ claimKey: string; status: string; evidence: { output: string } }>;
+    }>("run-readiness-check", {
+      companyId,
+      issueId,
+    });
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      blockingCount: 1,
+      fileCount: 0,
+    });
+    expect(result.checks).toEqual([
+      expect.objectContaining({
+        claimKey: "project-repo-folder-configured",
+        status: "missing",
+        evidence: expect.objectContaining({
+          output: expect.stringContaining("No local folder path is configured"),
+        }),
+      }),
+    ]);
   });
 
   it("accepts operator interaction events without taking over routing decisions", async () => {

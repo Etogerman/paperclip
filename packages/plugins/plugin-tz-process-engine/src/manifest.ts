@@ -15,6 +15,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "database.namespace.migrate",
     "database.namespace.read",
     "database.namespace.write",
+    "local.folders",
     "issues.read",
     "issues.create",
     "issues.update",
@@ -38,6 +39,16 @@ const manifest: PaperclipPluginManifestV1 = {
     migrationsDir: "migrations",
     coreReadTables: ["issues", "agents", "issue_documents", "issue_comments"]
   },
+  localFolders: [
+    {
+      folderKey: "project-repo",
+      displayName: "Project repository",
+      description: "Read-only project checkout used by TZ Process Engine for code-enforced Repo Inventory and Fact Ledger checks.",
+      access: "read",
+      requiredDirectories: [],
+      requiredFiles: []
+    }
+  ],
   apiRoutes: [
     {
       routeKey: "start-cycle",
@@ -54,6 +65,15 @@ const manifest: PaperclipPluginManifestV1 = {
       path: "/issues/:issueId/tz-process",
       auth: "board-or-agent",
       capability: "api.routes.register",
+      companyResolution: { from: "issue", param: "issueId" }
+    },
+    {
+      routeKey: "run-readiness-check",
+      method: "POST",
+      path: "/issues/:issueId/tz-process/readiness-check",
+      auth: "board-or-agent",
+      capability: "api.routes.register",
+      checkoutPolicy: "required-for-agent-in-progress",
       companyResolution: { from: "issue", param: "issueId" }
     }
   ]

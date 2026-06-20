@@ -1,6 +1,8 @@
 export const PLUGIN_ID = "paperclipai.plugin-tz-process-engine";
 export const PROCESS_KEY = "tz_creation_cycle";
 export const TRACE_DOCUMENT_KEY = "tz-process-trace";
+export const READINESS_REPORT_DOCUMENT_KEY = "tz-readiness-report";
+export const PROJECT_REPO_FOLDER_KEY = "project-repo";
 export const CLARIFICATION_INTERACTION_KEY = "clarification-r0";
 export const BLIND_DRAFT_ORIGIN_KIND = `plugin:${PLUGIN_ID}:blind-draft` as const;
 export const BLIND_DRAFT_ARTIFACT_KEY = "blind-draft-issue";
