@@ -36,7 +36,7 @@ const manifest: PaperclipPluginManifestV1 = {
   database: {
     namespaceSlug: "tz_process_engine",
     migrationsDir: "migrations",
-    coreReadTables: ["issues", "agents", "issue_documents"]
+    coreReadTables: ["issues", "agents", "issue_documents", "issue_comments"]
   },
   apiRoutes: [
     {

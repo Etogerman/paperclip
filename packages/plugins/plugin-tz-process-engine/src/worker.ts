@@ -10,7 +10,6 @@ import {
 import type {
   Agent,
   Issue,
-  IssueDocument,
   IssueThreadInteraction,
 } from "@paperclipai/shared";
 import {
@@ -137,6 +136,14 @@ type ParsedConvergenceVerdict = {
   raw: string;
 };
 
+type SelectedIssueDocument = {
+  id: string;
+  key: string;
+  title: string | null;
+  latestRevisionId: string | null;
+  body: string;
+};
+
 type SelectedAgentRecord = {
   agentId: string | null;
   agentName: string | null;
@@ -148,7 +155,7 @@ type SelectedAgentRecord = {
 
 type DraftDocumentSelection = {
   issue: Issue;
-  document: IssueDocument;
+  document: SelectedIssueDocument;
   body: string;
 };
 
@@ -478,7 +485,13 @@ async function findConvergenceCheckIssueForAuthor(
   return findExistingConvergenceCheckIssue(ctx, run.companyId, run, author, roundNumber);
 }
 
-function scoreDraftDocument(document: IssueDocument) {
+type CoreIssueCommentRow = {
+  id: string;
+  body: string;
+  created_at: string;
+};
+
+function scoreDraftDocument(document: SelectedIssueDocument) {
   const key = document.key.toLowerCase();
   const title = (document.title ?? "").toLowerCase();
   let score = 0;
@@ -490,20 +503,65 @@ function scoreDraftDocument(document: IssueDocument) {
   return score;
 }
 
+function toSelectedIssueDocument(document: {
+  id: string;
+  key: string;
+  title?: string | null;
+  latestRevisionId?: string | null;
+  body: string;
+}): SelectedIssueDocument {
+  return {
+    id: document.id,
+    key: document.key,
+    title: document.title ?? null,
+    latestRevisionId: document.latestRevisionId ?? null,
+    body: document.body,
+  };
+}
+
+async function selectDraftDocumentFromCoreTables(
+  ctx: PluginContext,
+  issue: Issue,
+  companyId: string,
+): Promise<DraftDocumentSelection | null> {
+  const rows = await ctx.db.query<CoreIssueCommentRow>(
+    `SELECT id::text AS id,
+            body,
+            created_at::text AS created_at
+       FROM public.issue_comments
+      WHERE issue_id = $1
+        AND company_id = $2
+        AND COALESCE(body, '') <> ''
+      ORDER BY created_at DESC
+      LIMIT 10`,
+    [issue.id, companyId],
+  );
+  const documents = rows.map((row) => ({
+    id: row.id,
+    key: `issue-comment-${row.id}`,
+    title: `Issue comment ${row.created_at}`,
+    latestRevisionId: row.id,
+    body: row.body,
+  })).filter((document) => document.body.trim().length > 0);
+  documents.sort((left, right) => scoreDraftDocument(right) - scoreDraftDocument(left));
+  const document = documents[0];
+  return document ? { issue, document, body: document.body } : null;
+}
+
 async function selectDraftDocument(
   ctx: PluginContext,
   issue: Issue,
   companyId: string,
 ): Promise<DraftDocumentSelection | null> {
   const summaries = await ctx.issues.documents.list(issue.id, companyId);
-  const documents: IssueDocument[] = [];
+  const documents: SelectedIssueDocument[] = [];
   for (const summary of summaries) {
     const document = await ctx.issues.documents.get(issue.id, summary.key, companyId);
-    if (document?.body.trim()) documents.push(document);
+    if (document?.body.trim()) documents.push(toSelectedIssueDocument(document));
   }
   documents.sort((left, right) => scoreDraftDocument(right) - scoreDraftDocument(left));
   const document = documents[0];
-  return document ? { issue, document, body: document.body } : null;
+  return document ? { issue, document, body: document.body } : selectDraftDocumentFromCoreTables(ctx, issue, companyId);
 }
 
 async function selectedOrFallbackAgent(
