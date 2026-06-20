@@ -12,6 +12,8 @@ import {
   CLARIFICATION_INTERACTION_KEY,
   PING_PONG_ORIGIN_KIND,
   PROCESS_KEY,
+  QA_REVIEW_ARTIFACT_KEY,
+  QA_REVIEW_ORIGIN_KIND,
   SYNTHESIS_ARTIFACT_KEY,
   SYNTHESIS_ORIGIN_KIND,
   TRACE_DOCUMENT_KEY,
@@ -1400,6 +1402,157 @@ describe("TZ Process Engine plugin", () => {
     expect(harness.activity).toEqual(expect.arrayContaining([
       expect.objectContaining({
         message: "Синтез финального ТЗ запущен: оба автора подтвердили схождение",
+        entityId: rootIssueId,
+      }),
+    ]));
+  });
+
+  it("creates cross-vendor QA review tasks when CTO synthesis is done", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    const synthesisIssueId = randomUUID();
+    const ctoAgentId = randomUUID();
+    const qaCodexAgentId = randomUUID();
+    const qaClaudeAgentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date().toISOString();
+    const harness = createTestHarness({ manifest });
+    harness.seed({
+      issues: [
+        issue({
+          id: rootIssueId,
+          companyId,
+          title: "GER-118 root task",
+          identifier: "GER-118",
+          projectId: "project-1",
+          status: "in_review",
+        }),
+        issue({
+          id: synthesisIssueId,
+          companyId,
+          title: "GER-118 Синтез финального ТЗ после схождения, раунд 2",
+          identifier: "GER-171",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: ctoAgentId,
+          originKind: SYNTHESIS_ORIGIN_KIND,
+          originId: `${runId}:cto-synthesis:r2`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+      ],
+      agents: [
+        agent({
+          id: ctoAgentId,
+          companyId,
+          name: "CTO",
+          adapterType: "codex_local",
+        }),
+        agent({
+          id: qaCodexAgentId,
+          companyId,
+          name: "QA",
+          adapterType: "codex_local",
+        }),
+        agent({
+          id: qaClaudeAgentId,
+          companyId,
+          name: "Claude QA",
+          adapterType: "claude_local",
+        }),
+      ],
+    });
+    await plugin.definition.setup(harness.ctx);
+    await harness.ctx.issues.documents.upsert({
+      issueId: synthesisIssueId,
+      companyId,
+      key: "final-tz",
+      title: "Финальное ТЗ",
+      body: "Финальное ТЗ с критериями приёмки и планом проверки.",
+    });
+
+    const runRow = {
+      id: runId,
+      company_id: companyId,
+      root_issue_id: rootIssueId,
+      process_key: PROCESS_KEY,
+      status: "synthesizing",
+      state: "cto_synthesis_dispatched",
+      current_round: 2,
+      max_rounds: 6,
+      qa_rework_limit: 2,
+      idempotency_key: "tz-cycle:qa-test",
+      operator_input: {},
+      selected_agents: {
+        synthesisRound2: {
+          cto: {
+            agentId: ctoAgentId,
+            agentName: "CTO",
+            adapterType: "codex_local",
+            issueId: synthesisIssueId,
+            issueIdentifier: "GER-171",
+            wakeupRunId: null,
+          },
+        },
+      },
+      started_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+    const originalQuery = harness.ctx.db.query.bind(harness.ctx.db);
+    harness.ctx.db.query = async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes(".tz_process_runs") && sql.includes("cto_synthesis_dispatched")) {
+        return [runRow] as T[];
+      }
+      return originalQuery(sql, params);
+    };
+
+    await harness.emit("issue.updated", {}, {
+      companyId,
+      entityType: "issue",
+      entityId: synthesisIssueId,
+      actorType: "agent",
+      actorId: ctoAgentId,
+    });
+
+    const qaIssues = await harness.ctx.issues.list({
+      companyId,
+      originKindPrefix: QA_REVIEW_ORIGIN_KIND,
+      includePluginOperations: true,
+      limit: 10,
+    });
+    expect(qaIssues).toHaveLength(2);
+    expect(qaIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: qaCodexAgentId,
+        status: "todo",
+        originKind: QA_REVIEW_ORIGIN_KIND,
+        originId: `${runId}:qa-codex:r2`,
+        title: "GER-118 QA-проверка финального ТЗ, раунд 2: QA-Codex",
+      }),
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: qaClaudeAgentId,
+        status: "todo",
+        originKind: QA_REVIEW_ORIGIN_KIND,
+        originId: `${runId}:qa-claude:r2`,
+        title: "GER-118 QA-проверка финального ТЗ, раунд 2: QA-Claude",
+      }),
+    ]));
+    const descriptions = qaIssues.map((entry) => entry.description).join("\n");
+    expect(descriptions).toContain("Нужно независимо проверить финальное ТЗ после синтеза, раунд 2");
+    expect(descriptions).toContain("Финальное ТЗ с критериями приёмки и планом проверки.");
+    expect(descriptions).toContain("qa_status: ACCEPTED");
+    expect(descriptions).toContain("target: synthesis");
+    expect(harness.dbExecutes.some((entry) =>
+      entry.params?.includes("qa_round_2_dispatched"))).toBe(true);
+    expect(harness.dbExecutes.some((entry) =>
+      entry.sql.includes(".tz_process_artifacts") && entry.params?.includes(QA_REVIEW_ARTIFACT_KEY))).toBe(true);
+    expect(harness.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: "QA-проверка финального ТЗ запущена, раунд 2: назначены QA-Codex и QA-Claude",
         entityId: rootIssueId,
       }),
     ]));

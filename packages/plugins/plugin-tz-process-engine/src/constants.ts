@@ -10,6 +10,8 @@ export const CONVERGENCE_CHECK_ORIGIN_KIND = `plugin:${PLUGIN_ID}:convergence-ch
 export const CONVERGENCE_CHECK_ARTIFACT_KEY = "convergence-check-issue";
 export const SYNTHESIS_ORIGIN_KIND = `plugin:${PLUGIN_ID}:synthesis` as const;
 export const SYNTHESIS_ARTIFACT_KEY = "synthesis-issue";
+export const QA_REVIEW_ORIGIN_KIND = `plugin:${PLUGIN_ID}:qa-review` as const;
+export const QA_REVIEW_ARTIFACT_KEY = "qa-review-issue";
 export const DEFAULT_MAX_ROUNDS = 6;
 export const DEFAULT_QA_REWORK_LIMIT = 2;
 
