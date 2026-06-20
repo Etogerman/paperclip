@@ -1387,8 +1387,10 @@ describe("TZ Process Engine plugin", () => {
       status: "todo",
       originKind: SYNTHESIS_ORIGIN_KIND,
       originId: `${runId}:cto-synthesis:r1`,
+      title: "GER-118 Синтез финального ТЗ после схождения, раунд 1",
     }));
-    expect(synthesisIssues[0]?.description).toContain("Ты CTO. Авторы сошлись после round 1");
+    expect(synthesisIssues[0]?.description).toContain("Авторы сошлись после раунда 1");
+    expect(synthesisIssues[0]?.description).not.toContain("Ты CTO");
     expect(synthesisIssues[0]?.description).toContain("Codex agreed technical specification material.");
     expect(synthesisIssues[0]?.description).toContain("Claude agreed technical specification material.");
     expect(harness.dbExecutes.some((entry) =>

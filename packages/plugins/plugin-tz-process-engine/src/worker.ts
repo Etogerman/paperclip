@@ -805,9 +805,9 @@ function buildSynthesisPrompt(input: {
   roundNumber: number;
 }) {
   return [
-    `Ты CTO. Авторы сошлись после round ${input.roundNumber}. Нужно собрать финальное ТЗ.`,
+    `Авторы сошлись после раунда ${input.roundNumber}. Нужно собрать финальное ТЗ.`,
     "",
-    "Задача CTO-синтеза:",
+    "Задача синтеза:",
     "1. Свести лучшие части версий Автор-Codex и Автор-Claude в один документ.",
     "2. Не выдумывать требования сверх входных материалов.",
     "3. Отдельно показать таблицу расхождений: позиция Codex / позиция Claude / решение / почему.",
@@ -1477,7 +1477,7 @@ async function createOrReuseSynthesisIssue(
     goalId: input.issue.goalId ?? undefined,
     parentId: input.issue.id,
     inheritExecutionWorkspaceFromIssueId: input.issue.id,
-    title: `${rootLabel} CTO synthesis after convergence round ${input.roundNumber}`,
+    title: `${rootLabel} Синтез финального ТЗ после схождения, раунд ${input.roundNumber}`,
     description: buildSynthesisPrompt(input),
     status: "todo",
     priority: input.issue.priority ?? "medium",
