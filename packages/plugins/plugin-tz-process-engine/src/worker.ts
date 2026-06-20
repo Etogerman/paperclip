@@ -10,6 +10,7 @@ import {
 import type {
   Agent,
   Issue,
+  IssueDocument,
   IssueThreadInteraction,
 } from "@paperclipai/shared";
 import {
@@ -18,6 +19,8 @@ import {
   DEFAULT_QA_REWORK_LIMIT,
   BLIND_DRAFT_ARTIFACT_KEY,
   BLIND_DRAFT_ORIGIN_KIND,
+  PING_PONG_ARTIFACT_KEY,
+  PING_PONG_ORIGIN_KIND,
   PROCESS_KEY,
   TRACE_DOCUMENT_KEY,
   type TzProcessStatus,
@@ -107,6 +110,26 @@ type DraftTaskResult = {
   wakeupRunId: string | null;
 };
 
+type PingPongTaskResult = DraftTaskResult & {
+  roundNumber: number;
+  otherAuthor: DraftAuthorDefinition;
+};
+
+type SelectedAgentRecord = {
+  agentId: string | null;
+  agentName: string | null;
+  adapterType: string | null;
+  issueId: string | null;
+  issueIdentifier: string | null;
+  wakeupRunId: string | null;
+};
+
+type DraftDocumentSelection = {
+  issue: Issue;
+  document: IssueDocument;
+  body: string;
+};
+
 type StartCycleInput = {
   companyId: string;
   issueId: string;
@@ -165,6 +188,27 @@ function selectAuthorAgent(agents: Agent[], definition: DraftAuthorDefinition): 
 
 function draftIssueOriginId(runId: string, roleKey: DraftAuthorRoleKey, roundNumber = 0) {
   return `${runId}:${roleKey}:r${roundNumber}`;
+}
+
+function pingPongIssueOriginId(runId: string, roleKey: DraftAuthorRoleKey, roundNumber = 1) {
+  return `${runId}:${roleKey}:r${roundNumber}`;
+}
+
+function authorByRoleKey(roleKey: DraftAuthorRoleKey) {
+  return DRAFT_AUTHORS.find((author) => author.roleKey === roleKey);
+}
+
+function selectedAgentRecord(run: TzProcessRunSummary, roleKey: DraftAuthorRoleKey): SelectedAgentRecord {
+  const selectedAgents = jsonObject(run.selectedAgents);
+  const record = jsonObject(selectedAgents[roleKey]);
+  return {
+    agentId: stringField(record.agentId),
+    agentName: stringField(record.agentName),
+    adapterType: stringField(record.adapterType),
+    issueId: stringField(record.issueId),
+    issueIdentifier: stringField(record.issueIdentifier),
+    wakeupRunId: stringField(record.wakeupRunId),
+  };
 }
 
 function operatorAnswerSummary(interaction: IssueThreadInteraction | null) {
@@ -267,6 +311,141 @@ async function findExistingDraftIssue(
   return existing[0] ?? null;
 }
 
+async function findExistingPingPongIssue(
+  ctx: PluginContext,
+  companyId: string,
+  run: TzProcessRunSummary,
+  author: DraftAuthorDefinition,
+  roundNumber: number,
+) {
+  const existing = await ctx.issues.list({
+    companyId,
+    originKind: PING_PONG_ORIGIN_KIND,
+    originId: pingPongIssueOriginId(run.id, author.roleKey, roundNumber),
+    includePluginOperations: true,
+    limit: 1,
+  });
+  return existing[0] ?? null;
+}
+
+async function findDraftIssueForAuthor(
+  ctx: PluginContext,
+  run: TzProcessRunSummary,
+  author: DraftAuthorDefinition,
+) {
+  const selected = selectedAgentRecord(run, author.roleKey);
+  if (selected.issueId) {
+    const selectedIssue = await ctx.issues.get(selected.issueId, run.companyId);
+    if (selectedIssue) return selectedIssue;
+  }
+  return findExistingDraftIssue(ctx, run.companyId, run, author);
+}
+
+function scoreDraftDocument(document: IssueDocument) {
+  const key = document.key.toLowerCase();
+  const title = (document.title ?? "").toLowerCase();
+  let score = 0;
+  if (key === TRACE_DOCUMENT_KEY || key.includes("trace") || key.includes("summary")) score -= 100;
+  if (key.includes("tz") || key.includes("тз") || title.includes("tz") || title.includes("тз")) score += 20;
+  if (key.includes("draft") || key.includes("черновик") || title.includes("draft") || title.includes("черновик")) score += 10;
+  if (key === "plan") score += 5;
+  if (document.body.trim().length > 0) score += 1;
+  return score;
+}
+
+async function selectDraftDocument(
+  ctx: PluginContext,
+  issue: Issue,
+  companyId: string,
+): Promise<DraftDocumentSelection | null> {
+  const summaries = await ctx.issues.documents.list(issue.id, companyId);
+  const documents: IssueDocument[] = [];
+  for (const summary of summaries) {
+    const document = await ctx.issues.documents.get(issue.id, summary.key, companyId);
+    if (document?.body.trim()) documents.push(document);
+  }
+  documents.sort((left, right) => scoreDraftDocument(right) - scoreDraftDocument(left));
+  const document = documents[0];
+  return document ? { issue, document, body: document.body } : null;
+}
+
+async function selectedOrFallbackAgent(
+  ctx: PluginContext,
+  run: TzProcessRunSummary,
+  author: DraftAuthorDefinition,
+) {
+  const selected = selectedAgentRecord(run, author.roleKey);
+  if (selected.agentId) {
+    const agent = await ctx.agents.get(selected.agentId, run.companyId);
+    if (agent && agentIsUsable(agent)) return agent;
+  }
+  const agents = await ctx.agents.list({ companyId: run.companyId, limit: 200 });
+  return selectAuthorAgent(agents, author);
+}
+
+function buildPingPongPrompt(input: {
+  issue: Issue;
+  run: TzProcessRunSummary;
+  author: DraftAuthorDefinition;
+  otherAuthor: DraftAuthorDefinition;
+  ownDraft: DraftDocumentSelection;
+  otherDraft: DraftDocumentSelection;
+  roundNumber: number;
+}) {
+  const ownDocument = input.ownDraft.document;
+  const otherDocument = input.otherDraft.document;
+  return [
+    `Ты ${input.author.title}. Это ping-pong round ${input.roundNumber} создания ТЗ.`,
+    "",
+    "Твоя задача:",
+    "1. Критически изучи свой черновик R0.",
+    `2. Критически изучи черновик ${input.otherAuthor.displayName} R0.`,
+    "3. Прими сильные пункты чужой версии, отклони слабые и явно выпиши спорные пункты.",
+    "4. Предложи новую лучшую версию своего ТЗ.",
+    "5. Пиши по-русски, заголовки тоже по-русски.",
+    "6. Не меняй код и не деплой ничего. Сейчас нужна только работа с ТЗ.",
+    "",
+    "Исходная задача:",
+    input.issue.title,
+    "",
+    "Твой черновик R0:",
+    `Документ: ${ownDocument.title ?? ownDocument.key}`,
+    `document_id: ${ownDocument.id}`,
+    `revision_id: ${ownDocument.latestRevisionId}`,
+    "",
+    input.ownDraft.body,
+    "",
+    `Черновик ${input.otherAuthor.displayName} R0:`,
+    `Документ: ${otherDocument.title ?? otherDocument.key}`,
+    `document_id: ${otherDocument.id}`,
+    `revision_id: ${otherDocument.latestRevisionId}`,
+    "",
+    input.otherDraft.body,
+    "",
+    "Ответ заверши строго таким структурным блоком:",
+    "```yaml",
+    "review_of_other:",
+    "  - \"...\"",
+    "accepted_points:",
+    "  - \"...\"",
+    "rejected_points:",
+    "  - \"...\"",
+    "remaining_deltas:",
+    "  - \"...\"",
+    "new_own_version: |",
+    "  ...",
+    "verdict: ИТЕРИРУЕМ",
+    "named_version:",
+    `  author: ${input.author.roleKey}`,
+    `  round: ${input.roundNumber}`,
+    "  document_id: null",
+    "  revision_id: null",
+    "```",
+    "",
+    "Если ты считаешь, что спорных пунктов уже нет, оставь remaining_deltas пустым и поставь verdict: СОШЛИСЬ.",
+  ].join("\n");
+}
+
 async function recordDraftIssueArtifact(
   ctx: PluginContext,
   input: {
@@ -297,6 +476,49 @@ async function recordDraftIssueArtifact(
         issueIdentifier: input.issue.identifier ?? null,
         issueTitle: input.issue.title,
         author: input.author.displayName,
+        agentId: input.agent.id,
+        agentName: input.agent.name,
+        adapterType: input.agent.adapterType,
+        wakeupRunId: input.wakeupRunId,
+      }),
+    ],
+  );
+}
+
+async function recordPingPongIssueArtifact(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    roundNumber: number;
+    author: DraftAuthorDefinition;
+    otherAuthor: DraftAuthorDefinition;
+    agent: Agent;
+    issue: Issue;
+    wakeupRunId: string | null;
+  },
+) {
+  await ctx.db.execute(
+    `INSERT INTO ${tableName(ctx, "tz_process_artifacts")}
+       (id, run_id, company_id, role_key, round_number, artifact_key, visibility, content, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, 'public', $7, $8::jsonb)
+     ON CONFLICT (run_id, role_key, round_number, artifact_key) DO UPDATE SET
+       content = EXCLUDED.content,
+       metadata = EXCLUDED.metadata,
+       updated_at = now()`,
+    [
+      randomUUID(),
+      input.run.id,
+      input.run.companyId,
+      input.author.roleKey,
+      input.roundNumber,
+      PING_PONG_ARTIFACT_KEY,
+      input.issue.description ?? "",
+      JSON.stringify({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier ?? null,
+        issueTitle: input.issue.title,
+        author: input.author.displayName,
+        otherAuthor: input.otherAuthor.displayName,
         agentId: input.agent.id,
         agentName: input.agent.name,
         adapterType: input.agent.adapterType,
@@ -354,6 +576,30 @@ async function activeRunForIssue(ctx: PluginContext, companyId: string, issueId:
     [companyId, issueId],
   );
   return rows[0] ? normalizeRun(rows[0]) : null;
+}
+
+async function activeRunsForDraftIssue(
+  ctx: PluginContext,
+  companyId: string,
+  draftIssueId: string,
+): Promise<TzProcessRunSummary[]> {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE company_id = $1
+        AND status = 'drafting'
+        AND state = 'blind_draft_tasks_dispatched'
+        AND (
+          selected_agents->'author-codex'->>'issueId' = $2
+          OR selected_agents->'author-claude'->>'issueId' = $2
+        )
+      ORDER BY updated_at ASC
+      LIMIT 10`,
+    [companyId, draftIssueId],
+  );
+  return rows.map(normalizeRun);
 }
 
 async function runByIdempotencyKey(ctx: PluginContext, companyId: string, idempotencyKey: string): Promise<TzProcessRunSummary | null> {
@@ -591,6 +837,48 @@ async function createOrReuseDraftIssue(
   });
 }
 
+async function createOrReusePingPongIssue(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary;
+    author: DraftAuthorDefinition;
+    otherAuthor: DraftAuthorDefinition;
+    agent: Agent;
+    ownDraft: DraftDocumentSelection;
+    otherDraft: DraftDocumentSelection;
+    roundNumber: number;
+  },
+) {
+  const existing = await findExistingPingPongIssue(
+    ctx,
+    input.run.companyId,
+    input.run,
+    input.author,
+    input.roundNumber,
+  );
+  if (existing) return existing;
+
+  const rootLabel = input.issue.identifier ?? input.issue.title;
+  return ctx.issues.create({
+    companyId: input.run.companyId,
+    projectId: input.issue.projectId ?? undefined,
+    goalId: input.issue.goalId ?? undefined,
+    parentId: input.issue.id,
+    inheritExecutionWorkspaceFromIssueId: input.issue.id,
+    title: `${rootLabel} ping-pong round ${input.roundNumber}: ${input.author.displayName} отвечает ${input.otherAuthor.displayName}`,
+    description: buildPingPongPrompt(input),
+    status: "todo",
+    priority: input.issue.priority ?? "medium",
+    assigneeAgentId: input.agent.id,
+    requestDepth: input.issue.requestDepth + 1,
+    billingCode: input.issue.billingCode,
+    originKind: PING_PONG_ORIGIN_KIND,
+    originId: pingPongIssueOriginId(input.run.id, input.author.roleKey, input.roundNumber),
+    originRunId: input.run.id,
+  });
+}
+
 async function reopenRootIssueForDrafting(ctx: PluginContext, issue: Issue, run: TzProcessRunSummary) {
   if (issue.status !== "done") return issue;
   const nextStatus = issue.assigneeAgentId || issue.assigneeUserId ? "in_progress" : "todo";
@@ -718,6 +1006,241 @@ async function dispatchBlindDraftTasks(ctx: PluginContext, run: TzProcessRunSumm
     ...run,
     status: "drafting",
     state: "blind_draft_tasks_dispatched",
+    selectedAgents,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function markRunNeedsOperatorForMissingDrafts(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    reason: string;
+    details: Record<string, unknown>;
+  },
+) {
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'needs_operator',
+            state = $3,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'drafting'
+        AND state = 'blind_draft_tasks_dispatched'`,
+    [input.run.id, input.run.companyId, input.reason],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "ping_pong_blocked_missing_blind_drafts",
+    payload: {
+      issueId: input.issue.id,
+      reason: input.reason,
+      ...input.details,
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "Ping-pong round 1 не запущен: не хватает готовых черновиков или документов",
+    entityType: "issue",
+    entityId: input.issue.id,
+    metadata: {
+      runId: input.run.id,
+      reason: input.reason,
+      ...input.details,
+    },
+  });
+  await writeTraceDocument(ctx, input.issue.id, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "needs_operator",
+    state: input.reason,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchPingPongRoundOneIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
+  if (run.status !== "drafting" || run.state !== "blind_draft_tasks_dispatched") return;
+
+  const issue = await ctx.issues.get(run.rootIssueId, run.companyId);
+  if (!issue) throw new Error(`Issue not found: ${run.rootIssueId}`);
+
+  const codexAuthor = authorByRoleKey("author-codex");
+  const claudeAuthor = authorByRoleKey("author-claude");
+  if (!codexAuthor || !claudeAuthor) throw new Error("Draft author definitions are incomplete");
+
+  const codexDraftIssue = await findDraftIssueForAuthor(ctx, run, codexAuthor);
+  const claudeDraftIssue = await findDraftIssueForAuthor(ctx, run, claudeAuthor);
+  if (!codexDraftIssue || !claudeDraftIssue) {
+    await markRunNeedsOperatorForMissingDrafts(ctx, {
+      run,
+      issue,
+      reason: "missing_blind_draft_issues",
+      details: {
+        codexDraftIssueId: codexDraftIssue?.id ?? null,
+        claudeDraftIssueId: claudeDraftIssue?.id ?? null,
+      },
+    });
+    return;
+  }
+
+  if (codexDraftIssue.status !== "done" || claudeDraftIssue.status !== "done") return;
+
+  const codexDraft = await selectDraftDocument(ctx, codexDraftIssue, run.companyId);
+  const claudeDraft = await selectDraftDocument(ctx, claudeDraftIssue, run.companyId);
+  if (!codexDraft || !claudeDraft) {
+    await markRunNeedsOperatorForMissingDrafts(ctx, {
+      run,
+      issue,
+      reason: "missing_blind_draft_documents",
+      details: {
+        codexDraftIssueId: codexDraftIssue.id,
+        claudeDraftIssueId: claudeDraftIssue.id,
+        codexDocumentFound: Boolean(codexDraft),
+        claudeDocumentFound: Boolean(claudeDraft),
+      },
+    });
+    return;
+  }
+
+  const codexAgent = await selectedOrFallbackAgent(ctx, run, codexAuthor);
+  const claudeAgent = await selectedOrFallbackAgent(ctx, run, claudeAuthor);
+  if (!codexAgent || !claudeAgent) {
+    await markRunNeedsOperatorForMissingAuthors(ctx, {
+      run,
+      issue,
+      missingAuthors: [
+        ...(!codexAgent ? [codexAuthor] : []),
+        ...(!claudeAgent ? [claudeAuthor] : []),
+      ],
+    });
+    return;
+  }
+
+  const roundNumber = 1;
+  const pingPongTasks: PingPongTaskResult[] = [];
+  const codexIssue = await createOrReusePingPongIssue(ctx, {
+    issue,
+    run,
+    author: codexAuthor,
+    otherAuthor: claudeAuthor,
+    agent: codexAgent,
+    ownDraft: codexDraft,
+    otherDraft: claudeDraft,
+    roundNumber,
+  });
+  pingPongTasks.push({
+    author: codexAuthor,
+    otherAuthor: claudeAuthor,
+    agent: codexAgent,
+    issue: codexIssue,
+    wakeupRunId: null,
+    roundNumber,
+  });
+
+  const claudeIssue = await createOrReusePingPongIssue(ctx, {
+    issue,
+    run,
+    author: claudeAuthor,
+    otherAuthor: codexAuthor,
+    agent: claudeAgent,
+    ownDraft: claudeDraft,
+    otherDraft: codexDraft,
+    roundNumber,
+  });
+  pingPongTasks.push({
+    author: claudeAuthor,
+    otherAuthor: codexAuthor,
+    agent: claudeAgent,
+    issue: claudeIssue,
+    wakeupRunId: null,
+    roundNumber,
+  });
+
+  const wakeups = await ctx.issues.requestWakeups(
+    pingPongTasks.map((task) => task.issue.id),
+    run.companyId,
+    {
+      reason: "TZ Process Engine: запустить ping-pong round 1",
+      contextSource: "tz_process_engine.ping_pong_r1",
+      idempotencyKeyPrefix: `${run.id}:ping-pong-r1`,
+    },
+  );
+  const wakeupByIssueId = new Map(wakeups.map((wakeup) => [wakeup.issueId, wakeup.runId ?? null]));
+  for (const task of pingPongTasks) {
+    task.wakeupRunId = wakeupByIssueId.get(task.issue.id) ?? null;
+    await recordPingPongIssueArtifact(ctx, { run, ...task });
+  }
+
+  const previousSelectedAgents = jsonObject(run.selectedAgents);
+  const pingPongRound = Object.fromEntries(pingPongTasks.map((task) => [
+    task.author.roleKey,
+    {
+      agentId: task.agent.id,
+      agentName: task.agent.name,
+      adapterType: task.agent.adapterType,
+      issueId: task.issue.id,
+      issueIdentifier: task.issue.identifier ?? null,
+      wakeupRunId: task.wakeupRunId,
+    },
+  ]));
+  const selectedAgents = {
+    ...previousSelectedAgents,
+    pingPongRound1: pingPongRound,
+  };
+
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'iterating',
+            state = 'ping_pong_round_1_dispatched',
+            current_round = 1,
+            selected_agents = $3::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'drafting'
+        AND state = 'blind_draft_tasks_dispatched'`,
+    [run.id, run.companyId, JSON.stringify(selectedAgents)],
+  );
+  await appendEvent(ctx, {
+    runId: run.id,
+    companyId: run.companyId,
+    eventType: "ping_pong_round_1_tasks_created",
+    payload: {
+      issueId: run.rootIssueId,
+      sourceDraftIssues: {
+        [codexAuthor.roleKey]: codexDraftIssue.id,
+        [claudeAuthor.roleKey]: claudeDraftIssue.id,
+      },
+      tasks: pingPongTasks.map((task) => ({
+        roleKey: task.author.roleKey,
+        author: task.author.displayName,
+        otherAuthor: task.otherAuthor.displayName,
+        agentId: task.agent.id,
+        agentName: task.agent.name,
+        adapterType: task.agent.adapterType,
+        issueId: task.issue.id,
+        issueIdentifier: task.issue.identifier ?? null,
+        wakeupRunId: task.wakeupRunId,
+      })),
+    },
+  });
+  await ctx.activity.log({
+    companyId: run.companyId,
+    message: "Ping-pong round 1 запущен: авторы получили черновики друг друга",
+    entityType: "issue",
+    entityId: run.rootIssueId,
+    metadata: {
+      runId: run.id,
+      pingPongIssueIds: pingPongTasks.map((task) => task.issue.id),
+    },
+  });
+  await writeTraceDocument(ctx, run.rootIssueId, run.companyId, issue.title, {
+    ...run,
+    status: "iterating",
+    state: "ping_pong_round_1_dispatched",
+    currentRound: 1,
     selectedAgents,
     updatedAt: new Date().toISOString(),
   });
@@ -950,6 +1473,69 @@ async function resumeReadyDraftingRuns(ctx: PluginContext) {
   }
 }
 
+async function resumeReadyPingPongRuns(ctx: PluginContext) {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE status = 'drafting'
+        AND state = 'blind_draft_tasks_dispatched'
+      ORDER BY updated_at ASC
+      LIMIT 20`,
+  );
+  for (const row of rows) {
+    const run = normalizeRun(row);
+    try {
+      await dispatchPingPongRoundOneIfReady(ctx, run);
+    } catch (err) {
+      await appendEvent(ctx, {
+        runId: run.id,
+        companyId: run.companyId,
+        eventType: "ping_pong_round_1_dispatch_failed",
+        payload: {
+          issueId: run.rootIssueId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+      ctx.logger.error("Failed to resume TZ ping-pong round 1 dispatch", {
+        runId: run.id,
+        issueId: run.rootIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) {
+  const issueId = typeof event.entityId === "string" ? event.entityId : null;
+  if (!issueId) return;
+  const runs = await activeRunsForDraftIssue(ctx, event.companyId, issueId);
+  for (const run of runs) {
+    try {
+      await dispatchPingPongRoundOneIfReady(ctx, run);
+    } catch (err) {
+      await appendEvent(ctx, {
+        runId: run.id,
+        companyId: run.companyId,
+        eventType: "issue_progress_dispatch_failed",
+        payload: {
+          eventId: event.eventId,
+          rawEventType: event.eventType,
+          issueId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+      ctx.logger.error("Failed to handle TZ issue progress event", {
+        runId: run.id,
+        issueId,
+        eventType: event.eventType,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 function readStartInput(
   params: Record<string, unknown>,
   context?: PluginPerformActionContext,
@@ -986,6 +1572,7 @@ const plugin = definePlugin({
     ] as const) {
       ctx.events.on(eventName, async (event) => recordInteractionResolution(ctx, event));
     }
+    ctx.events.on("issue.updated", async (event) => handleIssueProgressEvent(ctx, event));
 
     ctx.data.register("status", async (params) => {
       const companyId = stringField(params.companyId);
@@ -1011,6 +1598,7 @@ const plugin = definePlugin({
     });
 
     await resumeReadyDraftingRuns(ctx);
+    await resumeReadyPingPongRuns(ctx);
   },
 
   async onApiRequest(input: PluginApiRequestInput) {

@@ -4,6 +4,8 @@ export const TRACE_DOCUMENT_KEY = "tz-process-trace";
 export const CLARIFICATION_INTERACTION_KEY = "clarification-r0";
 export const BLIND_DRAFT_ORIGIN_KIND = `plugin:${PLUGIN_ID}:blind-draft` as const;
 export const BLIND_DRAFT_ARTIFACT_KEY = "blind-draft-issue";
+export const PING_PONG_ORIGIN_KIND = `plugin:${PLUGIN_ID}:ping-pong` as const;
+export const PING_PONG_ARTIFACT_KEY = "ping-pong-issue";
 export const DEFAULT_MAX_ROUNDS = 6;
 export const DEFAULT_QA_REWORK_LIMIT = 2;
 

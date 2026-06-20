@@ -4,7 +4,14 @@ import { pluginManifestV1Schema, type Agent, type Issue } from "@paperclipai/sha
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
-import { CLARIFICATION_INTERACTION_KEY, PROCESS_KEY, TRACE_DOCUMENT_KEY } from "../src/constants.js";
+import {
+  BLIND_DRAFT_ORIGIN_KIND,
+  PING_PONG_ARTIFACT_KEY,
+  CLARIFICATION_INTERACTION_KEY,
+  PING_PONG_ORIGIN_KIND,
+  PROCESS_KEY,
+  TRACE_DOCUMENT_KEY,
+} from "../src/constants.js";
 
 function issue(input: Partial<Issue> & Pick<Issue, "id" | "companyId" | "title">): Issue {
   const now = new Date();
@@ -394,6 +401,180 @@ describe("TZ Process Engine plugin", () => {
       expect.objectContaining({
         message: "Слепой раунд 0 запущен: созданы задачи для Автор-Codex и Автор-Claude",
         entityId: issueId,
+      }),
+    ]));
+  });
+
+  it("creates ping-pong round 1 tasks after both blind drafts are done", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    const codexAgentId = randomUUID();
+    const claudeAgentId = randomUUID();
+    const codexDraftIssueId = randomUUID();
+    const claudeDraftIssueId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date().toISOString();
+    const harness = createTestHarness({ manifest });
+    harness.seed({
+      issues: [
+        issue({
+          id: rootIssueId,
+          companyId,
+          title: "GER-118 root task",
+          identifier: "GER-118",
+          projectId: "project-1",
+          status: "in_progress",
+        }),
+        issue({
+          id: codexDraftIssueId,
+          companyId,
+          title: "GER-118 blind round 0: черновик ТЗ от Автор-Codex",
+          identifier: "GER-149",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: codexAgentId,
+          originKind: BLIND_DRAFT_ORIGIN_KIND,
+          originId: `${runId}:author-codex:r0`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+        issue({
+          id: claudeDraftIssueId,
+          companyId,
+          title: "GER-118 blind round 0: черновик ТЗ от Автор-Claude",
+          identifier: "GER-150",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: claudeAgentId,
+          originKind: BLIND_DRAFT_ORIGIN_KIND,
+          originId: `${runId}:author-claude:r0`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+      ],
+      agents: [
+        agent({
+          id: codexAgentId,
+          companyId,
+          name: "Автор-Codex",
+          adapterType: "codex_local",
+        }),
+        agent({
+          id: claudeAgentId,
+          companyId,
+          name: "Автор-Claude",
+          adapterType: "claude_local",
+        }),
+      ],
+    });
+    await plugin.definition.setup(harness.ctx);
+    await harness.ctx.issues.documents.upsert({
+      issueId: codexDraftIssueId,
+      companyId,
+      key: "tz-codex-r0",
+      title: "Черновик ТЗ Автор-Codex R0",
+      body: "Codex draft body with acceptance criteria.",
+    });
+    await harness.ctx.issues.documents.upsert({
+      issueId: claudeDraftIssueId,
+      companyId,
+      key: "plan",
+      title: "ТЗ GER-118 — черновик Автор-Claude (раунд 0)",
+      body: "Claude draft body with risk analysis.",
+    });
+
+    const runRow = {
+      id: runId,
+      company_id: companyId,
+      root_issue_id: rootIssueId,
+      process_key: PROCESS_KEY,
+      status: "drafting",
+      state: "blind_draft_tasks_dispatched",
+      current_round: 0,
+      max_rounds: 6,
+      qa_rework_limit: 2,
+      idempotency_key: "tz-cycle:ping-pong-test",
+      operator_input: {
+        task: "Create final TZ",
+        context: "Use existing project code as read-only context.",
+        projectId: "project-1",
+      },
+      selected_agents: {
+        "author-codex": {
+          agentId: codexAgentId,
+          agentName: "Автор-Codex",
+          adapterType: "codex_local",
+          issueId: codexDraftIssueId,
+          issueIdentifier: "GER-149",
+          wakeupRunId: null,
+        },
+        "author-claude": {
+          agentId: claudeAgentId,
+          agentName: "Автор-Claude",
+          adapterType: "claude_local",
+          issueId: claudeDraftIssueId,
+          issueIdentifier: "GER-150",
+          wakeupRunId: null,
+        },
+      },
+      started_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+    const originalQuery = harness.ctx.db.query.bind(harness.ctx.db);
+    harness.ctx.db.query = async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes(".tz_process_runs") && sql.includes("blind_draft_tasks_dispatched")) {
+        return [runRow] as T[];
+      }
+      return originalQuery(sql, params);
+    };
+
+    await harness.emit("issue.updated", {}, {
+      companyId,
+      entityType: "issue",
+      entityId: claudeDraftIssueId,
+      actorType: "agent",
+      actorId: claudeAgentId,
+    });
+
+    const pingPongIssues = await harness.ctx.issues.list({
+      companyId,
+      originKindPrefix: PING_PONG_ORIGIN_KIND,
+      includePluginOperations: true,
+      limit: 10,
+    });
+    expect(pingPongIssues).toHaveLength(2);
+    expect(pingPongIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: codexAgentId,
+        status: "todo",
+        originKind: PING_PONG_ORIGIN_KIND,
+        originId: `${runId}:author-codex:r1`,
+      }),
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: claudeAgentId,
+        status: "todo",
+        originKind: PING_PONG_ORIGIN_KIND,
+        originId: `${runId}:author-claude:r1`,
+      }),
+    ]));
+    const descriptions = pingPongIssues.map((entry) => entry.description).join("\n");
+    expect(descriptions).toContain("Это ping-pong round 1 создания ТЗ");
+    expect(descriptions).toContain("Codex draft body with acceptance criteria.");
+    expect(descriptions).toContain("Claude draft body with risk analysis.");
+    expect(descriptions).toContain("review_of_other:");
+    expect(harness.dbExecutes.some((entry) =>
+      entry.sql.includes("state = 'ping_pong_round_1_dispatched'"))).toBe(true);
+    expect(harness.dbExecutes.some((entry) =>
+      entry.sql.includes(".tz_process_artifacts") && entry.params?.includes(PING_PONG_ARTIFACT_KEY))).toBe(true);
+    expect(harness.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: "Ping-pong round 1 запущен: авторы получили черновики друг друга",
+        entityId: rootIssueId,
       }),
     ]));
   });
