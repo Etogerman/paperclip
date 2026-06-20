@@ -8,6 +8,8 @@ export const PING_PONG_ORIGIN_KIND = `plugin:${PLUGIN_ID}:ping-pong` as const;
 export const PING_PONG_ARTIFACT_KEY = "ping-pong-issue";
 export const CONVERGENCE_CHECK_ORIGIN_KIND = `plugin:${PLUGIN_ID}:convergence-check` as const;
 export const CONVERGENCE_CHECK_ARTIFACT_KEY = "convergence-check-issue";
+export const SYNTHESIS_ORIGIN_KIND = `plugin:${PLUGIN_ID}:synthesis` as const;
+export const SYNTHESIS_ARTIFACT_KEY = "synthesis-issue";
 export const DEFAULT_MAX_ROUNDS = 6;
 export const DEFAULT_QA_REWORK_LIMIT = 2;
 

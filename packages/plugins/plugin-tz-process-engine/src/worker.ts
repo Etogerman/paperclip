@@ -24,6 +24,8 @@ import {
   PING_PONG_ARTIFACT_KEY,
   PING_PONG_ORIGIN_KIND,
   PROCESS_KEY,
+  SYNTHESIS_ARTIFACT_KEY,
+  SYNTHESIS_ORIGIN_KIND,
   TRACE_DOCUMENT_KEY,
   type TzProcessStatus,
 } from "./constants.js";
@@ -122,6 +124,19 @@ type ConvergenceCheckTaskResult = DraftTaskResult & {
   otherAuthor: DraftAuthorDefinition;
 };
 
+type SynthesisTaskResult = {
+  agent: Agent;
+  issue: Issue;
+  wakeupRunId: string | null;
+  roundNumber: number;
+};
+
+type ParsedConvergenceVerdict = {
+  verdict: "converged" | "iterate" | "unknown";
+  remainingDeltasEmpty: boolean;
+  raw: string;
+};
+
 type SelectedAgentRecord = {
   agentId: string | null;
   agentName: string | null;
@@ -193,6 +208,15 @@ function selectAuthorAgent(agents: Agent[], definition: DraftAuthorDefinition): 
     ?? null;
 }
 
+function selectCtoAgent(agents: Agent[]): Agent | null {
+  const usable = agents.filter(agentIsUsable);
+  return usable.find((agent) => normalizeAgentName(agent.name) === "cto")
+    ?? usable.find((agent) => normalizeAgentName(agent.name).includes("cto"))
+    ?? usable.find((agent) => normalizeAgentName(agent.name).includes("техничес"))
+    ?? usable.find((agent) => normalizeAgentName(agent.name).includes("синтез"))
+    ?? null;
+}
+
 function draftIssueOriginId(runId: string, roleKey: DraftAuthorRoleKey, roundNumber = 0) {
   return `${runId}:${roleKey}:r${roundNumber}`;
 }
@@ -203,6 +227,10 @@ function pingPongIssueOriginId(runId: string, roleKey: DraftAuthorRoleKey, round
 
 function convergenceCheckIssueOriginId(runId: string, roleKey: DraftAuthorRoleKey, roundNumber = 1) {
   return `${runId}:${roleKey}:r${roundNumber}`;
+}
+
+function synthesisIssueOriginId(runId: string, roundNumber = 1) {
+  return `${runId}:cto-synthesis:r${roundNumber}`;
 }
 
 function authorByRoleKey(roleKey: DraftAuthorRoleKey) {
@@ -234,6 +262,29 @@ function selectedRoundAgentRecord(
   const selectedAgents = jsonObject(run.selectedAgents);
   const round = jsonObject(selectedAgents[roundKey]);
   return selectedAgentRecordFrom(round[roleKey]);
+}
+
+function parseConvergenceVerdict(text: string): ParsedConvergenceVerdict {
+  const matches = [...text.matchAll(/(?:verdict|вердикт)\s*[:：]\s*`?\**\s*(СОШЛИСЬ|ИТЕРИРУЕМ)/giu)];
+  const last = matches[matches.length - 1];
+  if (!last?.[1]) {
+    return {
+      verdict: "unknown",
+      remainingDeltasEmpty: false,
+      raw: text,
+    };
+  }
+  const tail = text.slice(last.index ?? 0);
+  const value = last[1].toUpperCase();
+  const remainingDeltasEmpty = /remaining_deltas\s*:\s*\[\s*\]/iu.test(tail)
+    || /remaining_deltas\s*:\s*null/iu.test(tail)
+    || /remaining_deltas\s*:\s*нет/iu.test(tail)
+    || /remaining[_\s-]*deltas[^.\n\r]*(?:пуст|нет|отсутств)/iu.test(tail);
+  return {
+    verdict: value === "СОШЛИСЬ" ? "converged" : "iterate",
+    remainingDeltasEmpty,
+    raw: tail,
+  };
 }
 
 function operatorAnswerSummary(interaction: IssueThreadInteraction | null) {
@@ -370,6 +421,22 @@ async function findExistingConvergenceCheckIssue(
   return existing[0] ?? null;
 }
 
+async function findExistingSynthesisIssue(
+  ctx: PluginContext,
+  companyId: string,
+  run: TzProcessRunSummary,
+  roundNumber: number,
+) {
+  const existing = await ctx.issues.list({
+    companyId,
+    originKind: SYNTHESIS_ORIGIN_KIND,
+    originId: synthesisIssueOriginId(run.id, roundNumber),
+    includePluginOperations: true,
+    limit: 1,
+  });
+  return existing[0] ?? null;
+}
+
 async function findDraftIssueForAuthor(
   ctx: PluginContext,
   run: TzProcessRunSummary,
@@ -395,6 +462,20 @@ async function findPingPongIssueForAuthor(
     if (selectedIssue) return selectedIssue;
   }
   return findExistingPingPongIssue(ctx, run.companyId, run, author, roundNumber);
+}
+
+async function findConvergenceCheckIssueForAuthor(
+  ctx: PluginContext,
+  run: TzProcessRunSummary,
+  author: DraftAuthorDefinition,
+  roundNumber: number,
+) {
+  const selected = selectedRoundAgentRecord(run, `convergenceCheckRound${roundNumber}`, author.roleKey);
+  if (selected.issueId) {
+    const selectedIssue = await ctx.issues.get(selected.issueId, run.companyId);
+    if (selectedIssue) return selectedIssue;
+  }
+  return findExistingConvergenceCheckIssue(ctx, run.companyId, run, author, roundNumber);
 }
 
 function scoreDraftDocument(document: IssueDocument) {
@@ -571,6 +652,125 @@ function buildConvergenceCheckPrompt(input: {
   ].join("\n");
 }
 
+function buildPingPongFollowUpPrompt(input: {
+  issue: Issue;
+  run: TzProcessRunSummary;
+  author: DraftAuthorDefinition;
+  otherAuthor: DraftAuthorDefinition;
+  ownCheck: DraftDocumentSelection;
+  otherCheck: DraftDocumentSelection;
+  ownVerdict: ParsedConvergenceVerdict;
+  otherVerdict: ParsedConvergenceVerdict;
+  roundNumber: number;
+}) {
+  return [
+    `Ты ${input.author.title}. Это ping-pong round ${input.roundNumber} создания ТЗ.`,
+    "",
+    "Почему запущен новый раунд:",
+    "- После проверки схождения хотя бы один автор вернул `ИТЕРИРУЕМ`.",
+    "- Нужно закрыть оставшиеся содержательные дельты, а не переписывать всё с нуля.",
+    "",
+    "Твоя задача:",
+    "1. Изучи свой вердикт проверки схождения.",
+    `2. Изучи вердикт ${input.otherAuthor.displayName}.`,
+    "3. Закрой спорные пункты, из-за которых round 1 не был признан завершённым.",
+    "4. Предложи обновлённую лучшую версию ТЗ или точечный патч к ней.",
+    "5. В конце снова дай структурный блок для Process Engine.",
+    "",
+    "Исходная задача:",
+    input.issue.title,
+    "",
+    `Твой вердикт convergence check round ${input.roundNumber - 1}:`,
+    `Распознанный verdict: ${input.ownVerdict.verdict}`,
+    `Документ: ${input.ownCheck.document.title ?? input.ownCheck.document.key}`,
+    "",
+    input.ownCheck.body,
+    "",
+    `Вердикт ${input.otherAuthor.displayName} convergence check round ${input.roundNumber - 1}:`,
+    `Распознанный verdict: ${input.otherVerdict.verdict}`,
+    `Документ: ${input.otherCheck.document.title ?? input.otherCheck.document.key}`,
+    "",
+    input.otherCheck.body,
+    "",
+    "Ответ заверши строго таким структурным блоком:",
+    "```yaml",
+    "review_of_other:",
+    "  - \"...\"",
+    "accepted_points:",
+    "  - \"...\"",
+    "rejected_points:",
+    "  - \"...\"",
+    "remaining_deltas:",
+    "  - \"...\"",
+    "new_own_version: |",
+    "  ...",
+    "verdict: ИТЕРИРУЕМ",
+    "named_version:",
+    `  author: ${input.author.roleKey}`,
+    `  round: ${input.roundNumber}`,
+    "  document_id: null",
+    "  revision_id: null",
+    "```",
+    "",
+    "Если после этого раунда спорных пунктов не осталось, оставь remaining_deltas пустым и поставь verdict: СОШЛИСЬ.",
+  ].join("\n");
+}
+
+function buildSynthesisPrompt(input: {
+  issue: Issue;
+  run: TzProcessRunSummary;
+  codexPingPong: DraftDocumentSelection;
+  claudePingPong: DraftDocumentSelection;
+  codexCheck: DraftDocumentSelection;
+  claudeCheck: DraftDocumentSelection;
+  roundNumber: number;
+}) {
+  return [
+    `Ты CTO. Авторы сошлись после round ${input.roundNumber}. Нужно собрать финальное ТЗ.`,
+    "",
+    "Задача CTO-синтеза:",
+    "1. Свести лучшие части версий Автор-Codex и Автор-Claude в один документ.",
+    "2. Не выдумывать требования сверх входных материалов.",
+    "3. Отдельно показать таблицу расхождений: позиция Codex / позиция Claude / решение / почему.",
+    "4. Если остались решения оператора, вынести их в раздел `Открытые вопросы оператору` с вариантами и рекомендацией.",
+    "5. Писать по-русски, заголовки тоже по-русски.",
+    "",
+    "Финальное ТЗ должно содержать:",
+    "1. Цель",
+    "2. Контекст",
+    "3. Границы MVP",
+    "4. Функциональные требования",
+    "5. Нефункциональные требования",
+    "6. Сценарии работы",
+    "7. Ограничения и риски",
+    "8. Критерии приёмки",
+    "9. План проверки",
+    "10. Таблица расхождений и решений",
+    "11. Открытые вопросы оператору",
+    "",
+    "Исходная задача:",
+    input.issue.title,
+    "",
+    "Версия/ход Автор-Codex:",
+    input.codexPingPong.body,
+    "",
+    "Версия/ход Автор-Claude:",
+    input.claudePingPong.body,
+    "",
+    "Проверка схождения Автор-Codex:",
+    input.codexCheck.body,
+    "",
+    "Проверка схождения Автор-Claude:",
+    input.claudeCheck.body,
+    "",
+    "В конце добавь короткий блок:",
+    "```yaml",
+    "synthesis_status: READY_FOR_QA",
+    "open_operator_questions_count: 0",
+    "```",
+  ].join("\n");
+}
+
 async function recordDraftIssueArtifact(
   ctx: PluginContext,
   input: {
@@ -696,6 +896,44 @@ async function recordConvergenceCheckIssueArtifact(
   );
 }
 
+async function recordSynthesisIssueArtifact(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    roundNumber: number;
+    agent: Agent;
+    issue: Issue;
+    wakeupRunId: string | null;
+  },
+) {
+  await ctx.db.execute(
+    `INSERT INTO ${tableName(ctx, "tz_process_artifacts")}
+       (id, run_id, company_id, role_key, round_number, artifact_key, visibility, content, metadata)
+     VALUES ($1, $2, $3, 'cto', $4, $5, 'public', $6, $7::jsonb)
+     ON CONFLICT (run_id, role_key, round_number, artifact_key) DO UPDATE SET
+       content = EXCLUDED.content,
+       metadata = EXCLUDED.metadata,
+       updated_at = now()`,
+    [
+      randomUUID(),
+      input.run.id,
+      input.run.companyId,
+      input.roundNumber,
+      SYNTHESIS_ARTIFACT_KEY,
+      input.issue.description ?? "",
+      JSON.stringify({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier ?? null,
+        issueTitle: input.issue.title,
+        agentId: input.agent.id,
+        agentName: input.agent.name,
+        adapterType: input.agent.adapterType,
+        wakeupRunId: input.wakeupRunId,
+      }),
+    ],
+  );
+}
+
 function normalizeRun(row: TzProcessRunRow): TzProcessRunSummary {
   return {
     id: row.id,
@@ -790,6 +1028,30 @@ async function activeRunsForPingPongIssue(
       ORDER BY updated_at ASC
       LIMIT 10`,
     [companyId, pingPongIssueId],
+  );
+  return rows.map(normalizeRun);
+}
+
+async function activeRunsForConvergenceCheckIssue(
+  ctx: PluginContext,
+  companyId: string,
+  convergenceCheckIssueId: string,
+): Promise<TzProcessRunSummary[]> {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE company_id = $1
+        AND status = 'iterating'
+        AND state = 'convergence_check_round_1_dispatched'
+        AND (
+          selected_agents->'convergenceCheckRound1'->'author-codex'->>'issueId' = $2
+          OR selected_agents->'convergenceCheckRound1'->'author-claude'->>'issueId' = $2
+        )
+      ORDER BY updated_at ASC
+      LIMIT 10`,
+    [companyId, convergenceCheckIssueId],
   );
   return rows.map(normalizeRun);
 }
@@ -1109,6 +1371,86 @@ async function createOrReuseConvergenceCheckIssue(
     billingCode: input.issue.billingCode,
     originKind: CONVERGENCE_CHECK_ORIGIN_KIND,
     originId: convergenceCheckIssueOriginId(input.run.id, input.author.roleKey, input.roundNumber),
+    originRunId: input.run.id,
+  });
+}
+
+async function createOrReuseSynthesisIssue(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary;
+    agent: Agent;
+    codexPingPong: DraftDocumentSelection;
+    claudePingPong: DraftDocumentSelection;
+    codexCheck: DraftDocumentSelection;
+    claudeCheck: DraftDocumentSelection;
+    roundNumber: number;
+  },
+) {
+  const existing = await findExistingSynthesisIssue(ctx, input.run.companyId, input.run, input.roundNumber);
+  if (existing) return existing;
+
+  const rootLabel = input.issue.identifier ?? input.issue.title;
+  return ctx.issues.create({
+    companyId: input.run.companyId,
+    projectId: input.issue.projectId ?? undefined,
+    goalId: input.issue.goalId ?? undefined,
+    parentId: input.issue.id,
+    inheritExecutionWorkspaceFromIssueId: input.issue.id,
+    title: `${rootLabel} CTO synthesis after convergence round ${input.roundNumber}`,
+    description: buildSynthesisPrompt(input),
+    status: "todo",
+    priority: input.issue.priority ?? "medium",
+    assigneeAgentId: input.agent.id,
+    requestDepth: input.issue.requestDepth + 1,
+    billingCode: input.issue.billingCode,
+    originKind: SYNTHESIS_ORIGIN_KIND,
+    originId: synthesisIssueOriginId(input.run.id, input.roundNumber),
+    originRunId: input.run.id,
+  });
+}
+
+async function createOrReuseFollowUpPingPongIssue(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary;
+    author: DraftAuthorDefinition;
+    otherAuthor: DraftAuthorDefinition;
+    agent: Agent;
+    ownCheck: DraftDocumentSelection;
+    otherCheck: DraftDocumentSelection;
+    ownVerdict: ParsedConvergenceVerdict;
+    otherVerdict: ParsedConvergenceVerdict;
+    roundNumber: number;
+  },
+) {
+  const existing = await findExistingPingPongIssue(
+    ctx,
+    input.run.companyId,
+    input.run,
+    input.author,
+    input.roundNumber,
+  );
+  if (existing) return existing;
+
+  const rootLabel = input.issue.identifier ?? input.issue.title;
+  return ctx.issues.create({
+    companyId: input.run.companyId,
+    projectId: input.issue.projectId ?? undefined,
+    goalId: input.issue.goalId ?? undefined,
+    parentId: input.issue.id,
+    inheritExecutionWorkspaceFromIssueId: input.issue.id,
+    title: `${rootLabel} ping-pong round ${input.roundNumber}: ${input.author.displayName} закрывает дельты`,
+    description: buildPingPongFollowUpPrompt(input),
+    status: "todo",
+    priority: input.issue.priority ?? "medium",
+    assigneeAgentId: input.agent.id,
+    requestDepth: input.issue.requestDepth + 1,
+    billingCode: input.issue.billingCode,
+    originKind: PING_PONG_ORIGIN_KIND,
+    originId: pingPongIssueOriginId(input.run.id, input.author.roleKey, input.roundNumber),
     originRunId: input.run.id,
   });
 }
@@ -1715,6 +2057,442 @@ async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: 
   });
 }
 
+async function markRunNeedsOperatorForConvergenceDecision(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    reason: string;
+    details: Record<string, unknown>;
+  },
+) {
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'needs_operator',
+            state = $3,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'iterating'
+        AND state = 'convergence_check_round_1_dispatched'`,
+    [input.run.id, input.run.companyId, input.reason],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "convergence_decision_blocked",
+    payload: {
+      issueId: input.issue.id,
+      reason: input.reason,
+      ...input.details,
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "Process Engine не смог автоматически принять решение после проверки схождения",
+    entityType: "issue",
+    entityId: input.issue.id,
+    metadata: {
+      runId: input.run.id,
+      reason: input.reason,
+      ...input.details,
+    },
+  });
+  await writeTraceDocument(ctx, input.issue.id, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "needs_operator",
+    state: input.reason,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchRoundTwoFromConvergenceDecision(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    codexAuthor: DraftAuthorDefinition;
+    claudeAuthor: DraftAuthorDefinition;
+    codexAgent: Agent;
+    claudeAgent: Agent;
+    codexCheck: DraftDocumentSelection;
+    claudeCheck: DraftDocumentSelection;
+    codexVerdict: ParsedConvergenceVerdict;
+    claudeVerdict: ParsedConvergenceVerdict;
+  },
+) {
+  const roundNumber = 2;
+  const pingPongTasks: PingPongTaskResult[] = [];
+  const codexIssue = await createOrReuseFollowUpPingPongIssue(ctx, {
+    issue: input.issue,
+    run: input.run,
+    author: input.codexAuthor,
+    otherAuthor: input.claudeAuthor,
+    agent: input.codexAgent,
+    ownCheck: input.codexCheck,
+    otherCheck: input.claudeCheck,
+    ownVerdict: input.codexVerdict,
+    otherVerdict: input.claudeVerdict,
+    roundNumber,
+  });
+  pingPongTasks.push({
+    author: input.codexAuthor,
+    otherAuthor: input.claudeAuthor,
+    agent: input.codexAgent,
+    issue: codexIssue,
+    wakeupRunId: null,
+    roundNumber,
+  });
+
+  const claudeIssue = await createOrReuseFollowUpPingPongIssue(ctx, {
+    issue: input.issue,
+    run: input.run,
+    author: input.claudeAuthor,
+    otherAuthor: input.codexAuthor,
+    agent: input.claudeAgent,
+    ownCheck: input.claudeCheck,
+    otherCheck: input.codexCheck,
+    ownVerdict: input.claudeVerdict,
+    otherVerdict: input.codexVerdict,
+    roundNumber,
+  });
+  pingPongTasks.push({
+    author: input.claudeAuthor,
+    otherAuthor: input.codexAuthor,
+    agent: input.claudeAgent,
+    issue: claudeIssue,
+    wakeupRunId: null,
+    roundNumber,
+  });
+
+  const wakeups = await ctx.issues.requestWakeups(
+    pingPongTasks.map((task) => task.issue.id),
+    input.run.companyId,
+    {
+      reason: "TZ Process Engine: запустить ping-pong round 2 по оставшимся дельтам",
+      contextSource: "tz_process_engine.ping_pong_r2",
+      idempotencyKeyPrefix: `${input.run.id}:ping-pong-r2`,
+    },
+  );
+  const wakeupByIssueId = new Map(wakeups.map((wakeup) => [wakeup.issueId, wakeup.runId ?? null]));
+  for (const task of pingPongTasks) {
+    task.wakeupRunId = wakeupByIssueId.get(task.issue.id) ?? null;
+    await recordPingPongIssueArtifact(ctx, { run: input.run, ...task });
+  }
+
+  const previousSelectedAgents = jsonObject(input.run.selectedAgents);
+  const pingPongRound = Object.fromEntries(pingPongTasks.map((task) => [
+    task.author.roleKey,
+    {
+      agentId: task.agent.id,
+      agentName: task.agent.name,
+      adapterType: task.agent.adapterType,
+      issueId: task.issue.id,
+      issueIdentifier: task.issue.identifier ?? null,
+      wakeupRunId: task.wakeupRunId,
+    },
+  ]));
+  const selectedAgents = {
+    ...previousSelectedAgents,
+    pingPongRound2: pingPongRound,
+  };
+
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'iterating',
+            state = 'ping_pong_round_2_dispatched',
+            current_round = 2,
+            selected_agents = $3::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'iterating'
+        AND state = 'convergence_check_round_1_dispatched'`,
+    [input.run.id, input.run.companyId, JSON.stringify(selectedAgents)],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "ping_pong_round_2_tasks_created",
+    payload: {
+      issueId: input.run.rootIssueId,
+      decision: {
+        codexVerdict: input.codexVerdict.verdict,
+        claudeVerdict: input.claudeVerdict.verdict,
+      },
+      tasks: pingPongTasks.map((task) => ({
+        roleKey: task.author.roleKey,
+        author: task.author.displayName,
+        otherAuthor: task.otherAuthor.displayName,
+        agentId: task.agent.id,
+        agentName: task.agent.name,
+        adapterType: task.agent.adapterType,
+        issueId: task.issue.id,
+        issueIdentifier: task.issue.identifier ?? null,
+        wakeupRunId: task.wakeupRunId,
+      })),
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "Ping-pong round 2 запущен: после проверки схождения остались дельты",
+    entityType: "issue",
+    entityId: input.run.rootIssueId,
+    metadata: {
+      runId: input.run.id,
+      codexVerdict: input.codexVerdict.verdict,
+      claudeVerdict: input.claudeVerdict.verdict,
+      pingPongIssueIds: pingPongTasks.map((task) => task.issue.id),
+    },
+  });
+  await writeTraceDocument(ctx, input.run.rootIssueId, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "iterating",
+    state: "ping_pong_round_2_dispatched",
+    currentRound: 2,
+    selectedAgents,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchSynthesisFromConvergenceDecision(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    ctoAgent: Agent;
+    codexPingPong: DraftDocumentSelection;
+    claudePingPong: DraftDocumentSelection;
+    codexCheck: DraftDocumentSelection;
+    claudeCheck: DraftDocumentSelection;
+    roundNumber: number;
+  },
+) {
+  const synthesisIssue = await createOrReuseSynthesisIssue(ctx, {
+    ...input,
+    agent: input.ctoAgent,
+  });
+  const wakeups = await ctx.issues.requestWakeups([synthesisIssue.id], input.run.companyId, {
+    reason: "TZ Process Engine: запустить CTO-синтез финального ТЗ",
+    contextSource: "tz_process_engine.cto_synthesis",
+    idempotencyKeyPrefix: `${input.run.id}:cto-synthesis-r${input.roundNumber}`,
+  });
+  const wakeupRunId = wakeups[0]?.runId ?? null;
+  const task: SynthesisTaskResult = {
+    agent: input.ctoAgent,
+    issue: synthesisIssue,
+    wakeupRunId,
+    roundNumber: input.roundNumber,
+  };
+  await recordSynthesisIssueArtifact(ctx, { run: input.run, ...task });
+
+  const previousSelectedAgents = jsonObject(input.run.selectedAgents);
+  const selectedAgents = {
+    ...previousSelectedAgents,
+    synthesisRound1: {
+      cto: {
+        agentId: input.ctoAgent.id,
+        agentName: input.ctoAgent.name,
+        adapterType: input.ctoAgent.adapterType,
+        issueId: synthesisIssue.id,
+        issueIdentifier: synthesisIssue.identifier ?? null,
+        wakeupRunId,
+      },
+    },
+  };
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'synthesizing',
+            state = 'cto_synthesis_dispatched',
+            selected_agents = $3::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'iterating'
+        AND state = 'convergence_check_round_1_dispatched'`,
+    [input.run.id, input.run.companyId, JSON.stringify(selectedAgents)],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "cto_synthesis_task_created",
+    payload: {
+      issueId: input.run.rootIssueId,
+      synthesisIssueId: synthesisIssue.id,
+      synthesisIssueIdentifier: synthesisIssue.identifier ?? null,
+      wakeupRunId,
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "CTO-синтез запущен: оба автора подтвердили схождение",
+    entityType: "issue",
+    entityId: input.run.rootIssueId,
+    metadata: {
+      runId: input.run.id,
+      synthesisIssueId: synthesisIssue.id,
+      wakeupRunId,
+    },
+  });
+  await writeTraceDocument(ctx, input.run.rootIssueId, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "synthesizing",
+    state: "cto_synthesis_dispatched",
+    selectedAgents,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchConvergenceDecisionRoundOneIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
+  if (run.status !== "iterating" || run.state !== "convergence_check_round_1_dispatched") return;
+
+  const issue = await ctx.issues.get(run.rootIssueId, run.companyId);
+  if (!issue) throw new Error(`Issue not found: ${run.rootIssueId}`);
+
+  const codexAuthor = authorByRoleKey("author-codex");
+  const claudeAuthor = authorByRoleKey("author-claude");
+  if (!codexAuthor || !claudeAuthor) throw new Error("Draft author definitions are incomplete");
+
+  const roundNumber = 1;
+  const codexCheckIssue = await findConvergenceCheckIssueForAuthor(ctx, run, codexAuthor, roundNumber);
+  const claudeCheckIssue = await findConvergenceCheckIssueForAuthor(ctx, run, claudeAuthor, roundNumber);
+  if (!codexCheckIssue || !claudeCheckIssue) {
+    await markRunNeedsOperatorForConvergenceDecision(ctx, {
+      run,
+      issue,
+      reason: "missing_convergence_check_issues",
+      details: {
+        codexCheckIssueId: codexCheckIssue?.id ?? null,
+        claudeCheckIssueId: claudeCheckIssue?.id ?? null,
+      },
+    });
+    return;
+  }
+  if (codexCheckIssue.status !== "done" || claudeCheckIssue.status !== "done") return;
+
+  const codexCheck = await selectDraftDocument(ctx, codexCheckIssue, run.companyId);
+  const claudeCheck = await selectDraftDocument(ctx, claudeCheckIssue, run.companyId);
+  if (!codexCheck || !claudeCheck) {
+    await markRunNeedsOperatorForConvergenceDecision(ctx, {
+      run,
+      issue,
+      reason: "missing_convergence_check_documents",
+      details: {
+        codexCheckIssueId: codexCheckIssue.id,
+        claudeCheckIssueId: claudeCheckIssue.id,
+        codexDocumentFound: Boolean(codexCheck),
+        claudeDocumentFound: Boolean(claudeCheck),
+      },
+    });
+    return;
+  }
+
+  const codexVerdict = parseConvergenceVerdict(codexCheck.body);
+  const claudeVerdict = parseConvergenceVerdict(claudeCheck.body);
+  if (codexVerdict.verdict === "unknown" || claudeVerdict.verdict === "unknown") {
+    await markRunNeedsOperatorForConvergenceDecision(ctx, {
+      run,
+      issue,
+      reason: "unparseable_convergence_verdict",
+      details: {
+        codexVerdict: codexVerdict.verdict,
+        claudeVerdict: claudeVerdict.verdict,
+      },
+    });
+    return;
+  }
+
+  const agents = await ctx.agents.list({ companyId: run.companyId, limit: 200 });
+  const codexAgent = await selectedOrFallbackAgent(ctx, run, codexAuthor);
+  const claudeAgent = await selectedOrFallbackAgent(ctx, run, claudeAuthor);
+  if (!codexAgent || !claudeAgent) {
+    await markRunNeedsOperatorForMissingAuthors(ctx, {
+      run,
+      issue,
+      missingAuthors: [
+        ...(!codexAgent ? [codexAuthor] : []),
+        ...(!claudeAgent ? [claudeAuthor] : []),
+      ],
+    });
+    return;
+  }
+
+  const bothConverged = codexVerdict.verdict === "converged" && claudeVerdict.verdict === "converged";
+  if (!bothConverged) {
+    if (run.currentRound >= run.maxRounds) {
+      await markRunNeedsOperatorForConvergenceDecision(ctx, {
+        run,
+        issue,
+        reason: "max_rounds_reached_after_convergence_check",
+        details: {
+          codexVerdict: codexVerdict.verdict,
+          claudeVerdict: claudeVerdict.verdict,
+          currentRound: run.currentRound,
+          maxRounds: run.maxRounds,
+        },
+      });
+      return;
+    }
+    await dispatchRoundTwoFromConvergenceDecision(ctx, {
+      run,
+      issue,
+      codexAuthor,
+      claudeAuthor,
+      codexAgent,
+      claudeAgent,
+      codexCheck,
+      claudeCheck,
+      codexVerdict,
+      claudeVerdict,
+    });
+    return;
+  }
+
+  const ctoAgent = selectCtoAgent(agents);
+  if (!ctoAgent) {
+    await markRunNeedsOperatorForConvergenceDecision(ctx, {
+      run,
+      issue,
+      reason: "missing_cto_agent_for_synthesis",
+      details: {
+        codexVerdict: codexVerdict.verdict,
+        claudeVerdict: claudeVerdict.verdict,
+      },
+    });
+    return;
+  }
+
+  const codexPingPongIssue = await findPingPongIssueForAuthor(ctx, run, codexAuthor, roundNumber);
+  const claudePingPongIssue = await findPingPongIssueForAuthor(ctx, run, claudeAuthor, roundNumber);
+  const codexPingPong = codexPingPongIssue ? await selectDraftDocument(ctx, codexPingPongIssue, run.companyId) : null;
+  const claudePingPong = claudePingPongIssue ? await selectDraftDocument(ctx, claudePingPongIssue, run.companyId) : null;
+  if (!codexPingPong || !claudePingPong) {
+    await markRunNeedsOperatorForConvergenceDecision(ctx, {
+      run,
+      issue,
+      reason: "missing_ping_pong_documents_for_synthesis",
+      details: {
+        codexPingPongIssueId: codexPingPongIssue?.id ?? null,
+        claudePingPongIssueId: claudePingPongIssue?.id ?? null,
+        codexDocumentFound: Boolean(codexPingPong),
+        claudeDocumentFound: Boolean(claudePingPong),
+      },
+    });
+    return;
+  }
+
+  await dispatchSynthesisFromConvergenceDecision(ctx, {
+    run,
+    issue,
+    ctoAgent,
+    codexPingPong,
+    claudePingPong,
+    codexCheck,
+    claudeCheck,
+    roundNumber,
+  });
+}
+
 async function buildStatus(
   ctx: PluginContext,
   companyId: string,
@@ -2010,6 +2788,40 @@ async function resumeReadyConvergenceCheckRuns(ctx: PluginContext) {
   }
 }
 
+async function resumeReadyConvergenceDecisionRuns(ctx: PluginContext) {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE status = 'iterating'
+        AND state = 'convergence_check_round_1_dispatched'
+      ORDER BY updated_at ASC
+      LIMIT 20`,
+  );
+  for (const row of rows) {
+    const run = normalizeRun(row);
+    try {
+      await dispatchConvergenceDecisionRoundOneIfReady(ctx, run);
+    } catch (err) {
+      await appendEvent(ctx, {
+        runId: run.id,
+        companyId: run.companyId,
+        eventType: "convergence_decision_dispatch_failed",
+        payload: {
+          issueId: run.rootIssueId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+      ctx.logger.error("Failed to resume TZ convergence decision dispatch", {
+        runId: run.id,
+        issueId: run.rootIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) {
   const issueId = typeof event.entityId === "string" ? event.entityId : null;
   if (!issueId) return;
@@ -2020,11 +2832,15 @@ async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) 
   for (const run of await activeRunsForPingPongIssue(ctx, event.companyId, issueId)) {
     runsById.set(run.id, run);
   }
+  for (const run of await activeRunsForConvergenceCheckIssue(ctx, event.companyId, issueId)) {
+    runsById.set(run.id, run);
+  }
   const runs = [...runsById.values()];
   for (const run of runs) {
     try {
       await dispatchPingPongRoundOneIfReady(ctx, run);
       await dispatchConvergenceCheckRoundOneIfReady(ctx, run);
+      await dispatchConvergenceDecisionRoundOneIfReady(ctx, run);
     } catch (err) {
       await appendEvent(ctx, {
         runId: run.id,
@@ -2111,6 +2927,7 @@ const plugin = definePlugin({
     await resumeReadyDraftingRuns(ctx);
     await resumeReadyPingPongRuns(ctx);
     await resumeReadyConvergenceCheckRuns(ctx);
+    await resumeReadyConvergenceDecisionRuns(ctx);
   },
 
   async onApiRequest(input: PluginApiRequestInput) {
