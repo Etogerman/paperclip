@@ -240,6 +240,26 @@ function synthesisIssueOriginId(runId: string, roundNumber = 1) {
   return `${runId}:cto-synthesis:r${roundNumber}`;
 }
 
+function pingPongState(roundNumber: number) {
+  return `ping_pong_round_${roundNumber}_dispatched`;
+}
+
+function convergenceCheckState(roundNumber: number) {
+  return `convergence_check_round_${roundNumber}_dispatched`;
+}
+
+function pingPongSelectedAgentsKey(roundNumber: number) {
+  return `pingPongRound${roundNumber}`;
+}
+
+function convergenceCheckSelectedAgentsKey(roundNumber: number) {
+  return `convergenceCheckRound${roundNumber}`;
+}
+
+function synthesisSelectedAgentsKey(roundNumber: number) {
+  return `synthesisRound${roundNumber}`;
+}
+
 function authorByRoleKey(roleKey: DraftAuthorRoleKey) {
   return DRAFT_AUTHORS.find((author) => author.roleKey === roleKey);
 }
@@ -463,7 +483,7 @@ async function findPingPongIssueForAuthor(
   author: DraftAuthorDefinition,
   roundNumber: number,
 ) {
-  const selected = selectedRoundAgentRecord(run, `pingPongRound${roundNumber}`, author.roleKey);
+  const selected = selectedRoundAgentRecord(run, pingPongSelectedAgentsKey(roundNumber), author.roleKey);
   if (selected.issueId) {
     const selectedIssue = await ctx.issues.get(selected.issueId, run.companyId);
     if (selectedIssue) return selectedIssue;
@@ -477,7 +497,7 @@ async function findConvergenceCheckIssueForAuthor(
   author: DraftAuthorDefinition,
   roundNumber: number,
 ) {
-  const selected = selectedRoundAgentRecord(run, `convergenceCheckRound${roundNumber}`, author.roleKey);
+  const selected = selectedRoundAgentRecord(run, convergenceCheckSelectedAgentsKey(roundNumber), author.roleKey);
   if (selected.issueId) {
     const selectedIssue = await ctx.issues.get(selected.issueId, run.companyId);
     if (selectedIssue) return selectedIssue;
@@ -652,6 +672,7 @@ function buildConvergenceCheckPrompt(input: {
 }) {
   const ownDocument = input.ownPingPong.document;
   const otherDocument = input.otherPingPong.document;
+  const nextRoundNumber = input.roundNumber + 1;
   return [
     `Ты ${input.author.title}. Это проверка схождения после ping-pong round ${input.roundNumber}.`,
     "",
@@ -662,7 +683,7 @@ function buildConvergenceCheckPrompt(input: {
     "",
     "Правила решения:",
     "- Если существенных спорных пунктов не осталось, верни `verdict: СОШЛИСЬ` и `remaining_deltas: []`.",
-    "- Если остались содержательные расхождения, верни `verdict: ИТЕРИРУЕМ` и перечисли точные дельты для round 2.",
+    `- Если остались содержательные расхождения, верни \`verdict: ИТЕРИРУЕМ\` и перечисли точные дельты для round ${nextRoundNumber}.`,
     "- Косметику, стиль и порядок разделов не считай блокером.",
     "- Блокером считай только то, что может сделать финальное ТЗ неверным, неполным или непроверяемым.",
     "",
@@ -690,7 +711,7 @@ function buildConvergenceCheckPrompt(input: {
     "  source: merged",
     "  reason: \"Кратко почему можно синтезировать финальное ТЗ\"",
     "remaining_deltas: []",
-    "round_2_prompt: null",
+    `round_${nextRoundNumber}_prompt: null`,
     "```",
     "",
     "Если нужен следующий раунд, используй такой вариант:",
@@ -703,8 +724,8 @@ function buildConvergenceCheckPrompt(input: {
     "  - id: \"delta-1\"",
     "    issue: \"Что именно расходится\"",
     "    why_it_matters: \"Почему это важно для финального ТЗ\"",
-    "    suggested_resolution: \"Какой вариант проверить в round 2\"",
-    "round_2_prompt: |",
+    `    suggested_resolution: "Какой вариант проверить в round ${nextRoundNumber}"`,
+    `round_${nextRoundNumber}_prompt: |`,
     "  Короткая инструкция автору для следующего раунда.",
     "```",
   ].join("\n");
@@ -731,7 +752,7 @@ function buildPingPongFollowUpPrompt(input: {
     "Твоя задача:",
     "1. Изучи свой вердикт проверки схождения.",
     `2. Изучи вердикт ${input.otherAuthor.displayName}.`,
-    "3. Закрой спорные пункты, из-за которых round 1 не был признан завершённым.",
+    `3. Закрой спорные пункты, из-за которых round ${input.roundNumber - 1} не был признан завершённым.`,
     "4. Предложи обновлённую лучшую версию ТЗ или точечный патч к ней.",
     "5. В конце снова дай структурный блок для Process Engine.",
     "",
@@ -1078,10 +1099,10 @@ async function activeRunsForPingPongIssue(
        FROM ${tableName(ctx, "tz_process_runs")}
       WHERE company_id = $1
         AND status = 'iterating'
-        AND state = 'ping_pong_round_1_dispatched'
+        AND state = ('ping_pong_round_' || current_round::text || '_dispatched')
         AND (
-          selected_agents->'pingPongRound1'->'author-codex'->>'issueId' = $2
-          OR selected_agents->'pingPongRound1'->'author-claude'->>'issueId' = $2
+          selected_agents #>> ARRAY['pingPongRound' || current_round::text, 'author-codex', 'issueId'] = $2
+          OR selected_agents #>> ARRAY['pingPongRound' || current_round::text, 'author-claude', 'issueId'] = $2
         )
       ORDER BY updated_at ASC
       LIMIT 10`,
@@ -1102,10 +1123,10 @@ async function activeRunsForConvergenceCheckIssue(
        FROM ${tableName(ctx, "tz_process_runs")}
       WHERE company_id = $1
         AND status = 'iterating'
-        AND state = 'convergence_check_round_1_dispatched'
+        AND state = ('convergence_check_round_' || current_round::text || '_dispatched')
         AND (
-          selected_agents->'convergenceCheckRound1'->'author-codex'->>'issueId' = $2
-          OR selected_agents->'convergenceCheckRound1'->'author-claude'->>'issueId' = $2
+          selected_agents #>> ARRAY['convergenceCheckRound' || current_round::text, 'author-codex', 'issueId'] = $2
+          OR selected_agents #>> ARRAY['convergenceCheckRound' || current_round::text, 'author-claude', 'issueId'] = $2
         )
       ORDER BY updated_at ASC
       LIMIT 10`,
@@ -1897,8 +1918,8 @@ async function markRunNeedsOperatorForMissingPingPongOutputs(
       WHERE id = $1
         AND company_id = $2
         AND status = 'iterating'
-        AND state = 'ping_pong_round_1_dispatched'`,
-    [input.run.id, input.run.companyId, input.reason],
+        AND state = $4`,
+    [input.run.id, input.run.companyId, input.reason, input.run.state],
   );
   await appendEvent(ctx, {
     runId: input.run.id,
@@ -1929,8 +1950,9 @@ async function markRunNeedsOperatorForMissingPingPongOutputs(
   });
 }
 
-async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
-  if (run.status !== "iterating" || run.state !== "ping_pong_round_1_dispatched") return;
+async function dispatchConvergenceCheckIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
+  const roundNumber = run.currentRound;
+  if (run.status !== "iterating" || run.state !== pingPongState(roundNumber)) return;
 
   const issue = await ctx.issues.get(run.rootIssueId, run.companyId);
   if (!issue) throw new Error(`Issue not found: ${run.rootIssueId}`);
@@ -1939,7 +1961,6 @@ async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: 
   const claudeAuthor = authorByRoleKey("author-claude");
   if (!codexAuthor || !claudeAuthor) throw new Error("Draft author definitions are incomplete");
 
-  const roundNumber = 1;
   const codexPingPongIssue = await findPingPongIssueForAuthor(ctx, run, codexAuthor, roundNumber);
   const claudePingPongIssue = await findPingPongIssueForAuthor(ctx, run, claudeAuthor, roundNumber);
   if (!codexPingPongIssue || !claudePingPongIssue) {
@@ -2031,9 +2052,9 @@ async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: 
     checkTasks.map((task) => task.issue.id),
     run.companyId,
     {
-      reason: "TZ Process Engine: проверить схождение после ping-pong round 1",
-      contextSource: "tz_process_engine.convergence_check_r1",
-      idempotencyKeyPrefix: `${run.id}:convergence-check-r1`,
+      reason: `TZ Process Engine: проверить схождение после ping-pong round ${roundNumber}`,
+      contextSource: `tz_process_engine.convergence_check_r${roundNumber}`,
+      idempotencyKeyPrefix: `${run.id}:convergence-check-r${roundNumber}`,
     },
   );
   const wakeupByIssueId = new Map(wakeups.map((wakeup) => [wakeup.issueId, wakeup.runId ?? null]));
@@ -2056,26 +2077,27 @@ async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: 
   ]));
   const selectedAgents = {
     ...previousSelectedAgents,
-    convergenceCheckRound1: convergenceCheckRound,
+    [convergenceCheckSelectedAgentsKey(roundNumber)]: convergenceCheckRound,
   };
+  const nextState = convergenceCheckState(roundNumber);
 
   await ctx.db.execute(
     `UPDATE ${tableName(ctx, "tz_process_runs")}
         SET status = 'iterating',
-            state = 'convergence_check_round_1_dispatched',
-            current_round = 1,
-            selected_agents = $3::jsonb,
+            state = $3,
+            current_round = $4,
+            selected_agents = $5::jsonb,
             updated_at = now()
       WHERE id = $1
         AND company_id = $2
         AND status = 'iterating'
-        AND state = 'ping_pong_round_1_dispatched'`,
-    [run.id, run.companyId, JSON.stringify(selectedAgents)],
+        AND state = $6`,
+    [run.id, run.companyId, nextState, roundNumber, JSON.stringify(selectedAgents), pingPongState(roundNumber)],
   );
   await appendEvent(ctx, {
     runId: run.id,
     companyId: run.companyId,
-    eventType: "convergence_check_round_1_tasks_created",
+    eventType: `convergence_check_round_${roundNumber}_tasks_created`,
     payload: {
       issueId: run.rootIssueId,
       sourcePingPongIssues: {
@@ -2097,7 +2119,7 @@ async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: 
   });
   await ctx.activity.log({
     companyId: run.companyId,
-    message: "Проверка схождения round 1 запущена: авторы должны дать короткий вердикт",
+    message: `Проверка схождения round ${roundNumber} запущена: авторы должны дать короткий вердикт`,
     entityType: "issue",
     entityId: run.rootIssueId,
     metadata: {
@@ -2108,8 +2130,8 @@ async function dispatchConvergenceCheckRoundOneIfReady(ctx: PluginContext, run: 
   await writeTraceDocument(ctx, run.rootIssueId, run.companyId, issue.title, {
     ...run,
     status: "iterating",
-    state: "convergence_check_round_1_dispatched",
-    currentRound: 1,
+    state: nextState,
+    currentRound: roundNumber,
     selectedAgents,
     updatedAt: new Date().toISOString(),
   });
@@ -2132,8 +2154,8 @@ async function markRunNeedsOperatorForConvergenceDecision(
       WHERE id = $1
         AND company_id = $2
         AND status = 'iterating'
-        AND state = 'convergence_check_round_1_dispatched'`,
-    [input.run.id, input.run.companyId, input.reason],
+        AND state = $4`,
+    [input.run.id, input.run.companyId, input.reason, input.run.state],
   );
   await appendEvent(ctx, {
     runId: input.run.id,
@@ -2164,7 +2186,7 @@ async function markRunNeedsOperatorForConvergenceDecision(
   });
 }
 
-async function dispatchRoundTwoFromConvergenceDecision(
+async function dispatchFollowUpPingPongFromConvergenceDecision(
   ctx: PluginContext,
   input: {
     run: TzProcessRunSummary;
@@ -2179,7 +2201,8 @@ async function dispatchRoundTwoFromConvergenceDecision(
     claudeVerdict: ParsedConvergenceVerdict;
   },
 ) {
-  const roundNumber = 2;
+  const previousRoundNumber = input.run.currentRound;
+  const roundNumber = previousRoundNumber + 1;
   const pingPongTasks: PingPongTaskResult[] = [];
   const codexIssue = await createOrReuseFollowUpPingPongIssue(ctx, {
     issue: input.issue,
@@ -2227,9 +2250,9 @@ async function dispatchRoundTwoFromConvergenceDecision(
     pingPongTasks.map((task) => task.issue.id),
     input.run.companyId,
     {
-      reason: "TZ Process Engine: запустить ping-pong round 2 по оставшимся дельтам",
-      contextSource: "tz_process_engine.ping_pong_r2",
-      idempotencyKeyPrefix: `${input.run.id}:ping-pong-r2`,
+      reason: `TZ Process Engine: запустить ping-pong round ${roundNumber} по оставшимся дельтам`,
+      contextSource: `tz_process_engine.ping_pong_r${roundNumber}`,
+      idempotencyKeyPrefix: `${input.run.id}:ping-pong-r${roundNumber}`,
     },
   );
   const wakeupByIssueId = new Map(wakeups.map((wakeup) => [wakeup.issueId, wakeup.runId ?? null]));
@@ -2252,26 +2275,34 @@ async function dispatchRoundTwoFromConvergenceDecision(
   ]));
   const selectedAgents = {
     ...previousSelectedAgents,
-    pingPongRound2: pingPongRound,
+    [pingPongSelectedAgentsKey(roundNumber)]: pingPongRound,
   };
+  const nextState = pingPongState(roundNumber);
 
   await ctx.db.execute(
     `UPDATE ${tableName(ctx, "tz_process_runs")}
         SET status = 'iterating',
-            state = 'ping_pong_round_2_dispatched',
-            current_round = 2,
-            selected_agents = $3::jsonb,
+            state = $3,
+            current_round = $4,
+            selected_agents = $5::jsonb,
             updated_at = now()
       WHERE id = $1
         AND company_id = $2
         AND status = 'iterating'
-        AND state = 'convergence_check_round_1_dispatched'`,
-    [input.run.id, input.run.companyId, JSON.stringify(selectedAgents)],
+        AND state = $6`,
+    [
+      input.run.id,
+      input.run.companyId,
+      nextState,
+      roundNumber,
+      JSON.stringify(selectedAgents),
+      convergenceCheckState(previousRoundNumber),
+    ],
   );
   await appendEvent(ctx, {
     runId: input.run.id,
     companyId: input.run.companyId,
-    eventType: "ping_pong_round_2_tasks_created",
+    eventType: `ping_pong_round_${roundNumber}_tasks_created`,
     payload: {
       issueId: input.run.rootIssueId,
       decision: {
@@ -2293,7 +2324,7 @@ async function dispatchRoundTwoFromConvergenceDecision(
   });
   await ctx.activity.log({
     companyId: input.run.companyId,
-    message: "Ping-pong round 2 запущен: после проверки схождения остались дельты",
+    message: `Ping-pong round ${roundNumber} запущен: после проверки схождения остались дельты`,
     entityType: "issue",
     entityId: input.run.rootIssueId,
     metadata: {
@@ -2306,8 +2337,8 @@ async function dispatchRoundTwoFromConvergenceDecision(
   await writeTraceDocument(ctx, input.run.rootIssueId, input.run.companyId, input.issue.title, {
     ...input.run,
     status: "iterating",
-    state: "ping_pong_round_2_dispatched",
-    currentRound: 2,
+    state: nextState,
+    currentRound: roundNumber,
     selectedAgents,
     updatedAt: new Date().toISOString(),
   });
@@ -2347,7 +2378,7 @@ async function dispatchSynthesisFromConvergenceDecision(
   const previousSelectedAgents = jsonObject(input.run.selectedAgents);
   const selectedAgents = {
     ...previousSelectedAgents,
-    synthesisRound1: {
+    [synthesisSelectedAgentsKey(input.roundNumber)]: {
       cto: {
         agentId: input.ctoAgent.id,
         agentName: input.ctoAgent.name,
@@ -2367,8 +2398,8 @@ async function dispatchSynthesisFromConvergenceDecision(
       WHERE id = $1
         AND company_id = $2
         AND status = 'iterating'
-        AND state = 'convergence_check_round_1_dispatched'`,
-    [input.run.id, input.run.companyId, JSON.stringify(selectedAgents)],
+        AND state = $4`,
+    [input.run.id, input.run.companyId, JSON.stringify(selectedAgents), convergenceCheckState(input.roundNumber)],
   );
   await appendEvent(ctx, {
     runId: input.run.id,
@@ -2401,8 +2432,9 @@ async function dispatchSynthesisFromConvergenceDecision(
   });
 }
 
-async function dispatchConvergenceDecisionRoundOneIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
-  if (run.status !== "iterating" || run.state !== "convergence_check_round_1_dispatched") return;
+async function dispatchConvergenceDecisionIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
+  const roundNumber = run.currentRound;
+  if (run.status !== "iterating" || run.state !== convergenceCheckState(roundNumber)) return;
 
   const issue = await ctx.issues.get(run.rootIssueId, run.companyId);
   if (!issue) throw new Error(`Issue not found: ${run.rootIssueId}`);
@@ -2411,7 +2443,6 @@ async function dispatchConvergenceDecisionRoundOneIfReady(ctx: PluginContext, ru
   const claudeAuthor = authorByRoleKey("author-claude");
   if (!codexAuthor || !claudeAuthor) throw new Error("Draft author definitions are incomplete");
 
-  const roundNumber = 1;
   const codexCheckIssue = await findConvergenceCheckIssueForAuthor(ctx, run, codexAuthor, roundNumber);
   const claudeCheckIssue = await findConvergenceCheckIssueForAuthor(ctx, run, claudeAuthor, roundNumber);
   if (!codexCheckIssue || !claudeCheckIssue) {
@@ -2491,7 +2522,7 @@ async function dispatchConvergenceDecisionRoundOneIfReady(ctx: PluginContext, ru
       });
       return;
     }
-    await dispatchRoundTwoFromConvergenceDecision(ctx, {
+    await dispatchFollowUpPingPongFromConvergenceDecision(ctx, {
       run,
       issue,
       codexAuthor,
@@ -2819,25 +2850,25 @@ async function resumeReadyConvergenceCheckRuns(ctx: PluginContext) {
             started_at, updated_at, completed_at
        FROM ${tableName(ctx, "tz_process_runs")}
       WHERE status = 'iterating'
-        AND state = 'ping_pong_round_1_dispatched'
+        AND state = ('ping_pong_round_' || current_round::text || '_dispatched')
       ORDER BY updated_at ASC
       LIMIT 20`,
   );
   for (const row of rows) {
     const run = normalizeRun(row);
     try {
-      await dispatchConvergenceCheckRoundOneIfReady(ctx, run);
+      await dispatchConvergenceCheckIfReady(ctx, run);
     } catch (err) {
       await appendEvent(ctx, {
         runId: run.id,
         companyId: run.companyId,
-        eventType: "convergence_check_round_1_dispatch_failed",
+        eventType: "convergence_check_dispatch_failed",
         payload: {
           issueId: run.rootIssueId,
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ convergence check round 1 dispatch", {
+      ctx.logger.error("Failed to resume TZ convergence check dispatch", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -2853,14 +2884,14 @@ async function resumeReadyConvergenceDecisionRuns(ctx: PluginContext) {
             started_at, updated_at, completed_at
        FROM ${tableName(ctx, "tz_process_runs")}
       WHERE status = 'iterating'
-        AND state = 'convergence_check_round_1_dispatched'
+        AND state = ('convergence_check_round_' || current_round::text || '_dispatched')
       ORDER BY updated_at ASC
       LIMIT 20`,
   );
   for (const row of rows) {
     const run = normalizeRun(row);
     try {
-      await dispatchConvergenceDecisionRoundOneIfReady(ctx, run);
+      await dispatchConvergenceDecisionIfReady(ctx, run);
     } catch (err) {
       await appendEvent(ctx, {
         runId: run.id,
@@ -2897,8 +2928,8 @@ async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) 
   for (const run of runs) {
     try {
       await dispatchPingPongRoundOneIfReady(ctx, run);
-      await dispatchConvergenceCheckRoundOneIfReady(ctx, run);
-      await dispatchConvergenceDecisionRoundOneIfReady(ctx, run);
+      await dispatchConvergenceCheckIfReady(ctx, run);
+      await dispatchConvergenceDecisionIfReady(ctx, run);
     } catch (err) {
       await appendEvent(ctx, {
         runId: run.id,
