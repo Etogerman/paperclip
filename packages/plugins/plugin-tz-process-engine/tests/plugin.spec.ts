@@ -1557,4 +1557,252 @@ describe("TZ Process Engine plugin", () => {
       }),
     ]));
   });
+
+  it("creates author rework tasks when QA returns an authors blocker", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    const synthesisIssueId = randomUUID();
+    const qaCodexIssueId = randomUUID();
+    const qaClaudeIssueId = randomUUID();
+    const codexAgentId = randomUUID();
+    const claudeAgentId = randomUUID();
+    const qaCodexAgentId = randomUUID();
+    const qaClaudeAgentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date().toISOString();
+    const harness = createTestHarness({ manifest });
+    harness.seed({
+      issues: [
+        issue({
+          id: rootIssueId,
+          companyId,
+          title: "GER-118 root task",
+          identifier: "GER-118",
+          projectId: "project-1",
+          status: "in_review",
+        }),
+        issue({
+          id: synthesisIssueId,
+          companyId,
+          title: "GER-118 Синтез финального ТЗ после схождения, раунд 2",
+          identifier: "GER-171",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          originKind: SYNTHESIS_ORIGIN_KIND,
+          originId: `${runId}:cto-synthesis:r2`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+        issue({
+          id: qaCodexIssueId,
+          companyId,
+          title: "GER-118 QA-проверка финального ТЗ, раунд 2: QA-Codex",
+          identifier: "GER-174",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: qaCodexAgentId,
+          originKind: QA_REVIEW_ORIGIN_KIND,
+          originId: `${runId}:qa-codex:r2`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+        issue({
+          id: qaClaudeIssueId,
+          companyId,
+          title: "GER-118 QA-проверка финального ТЗ, раунд 2: QA-Claude",
+          identifier: "GER-175",
+          parentId: rootIssueId,
+          projectId: "project-1",
+          status: "done",
+          assigneeAgentId: qaClaudeAgentId,
+          originKind: QA_REVIEW_ORIGIN_KIND,
+          originId: `${runId}:qa-claude:r2`,
+          originRunId: runId,
+          requestDepth: 1,
+        }),
+      ],
+      agents: [
+        agent({
+          id: codexAgentId,
+          companyId,
+          name: "Автор-Codex",
+          adapterType: "codex_local",
+        }),
+        agent({
+          id: claudeAgentId,
+          companyId,
+          name: "Автор-Claude",
+          adapterType: "claude_local",
+        }),
+        agent({
+          id: qaCodexAgentId,
+          companyId,
+          name: "QA",
+          adapterType: "codex_local",
+        }),
+        agent({
+          id: qaClaudeAgentId,
+          companyId,
+          name: "Claude QA",
+          adapterType: "claude_local",
+        }),
+      ],
+    });
+    await plugin.definition.setup(harness.ctx);
+    await harness.ctx.issues.documents.upsert({
+      issueId: synthesisIssueId,
+      companyId,
+      key: "final-tz",
+      title: "Финальное ТЗ",
+      body: "Финальное ТЗ R2.",
+    });
+    await harness.ctx.issues.documents.upsert({
+      issueId: qaCodexIssueId,
+      companyId,
+      key: "qa-review-codex-r2",
+      title: "QA-проверка Codex R2",
+      body: [
+        "```yaml",
+        "qa_status: BLOCKED",
+        "blockers:",
+        "  - target: authors",
+        "    summary: \"Нужно согласовать transaction-bound success audit.\"",
+        "non_blocking_notes: []",
+        "```",
+      ].join("\n"),
+    });
+    await harness.ctx.issues.documents.upsert({
+      issueId: qaClaudeIssueId,
+      companyId,
+      key: "continuation-summary",
+      title: "Continuation Summary",
+      body: [
+        "ВЕРДИКТ: ПРИНЯТО",
+        "```yaml",
+        "qa_status: ACCEPTED",
+        "blockers: []",
+        "non_blocking_notes: []",
+        "```",
+      ].join("\n"),
+    });
+
+    const runRow = {
+      id: runId,
+      company_id: companyId,
+      root_issue_id: rootIssueId,
+      process_key: PROCESS_KEY,
+      status: "qa",
+      state: "qa_round_2_dispatched",
+      current_round: 2,
+      max_rounds: 6,
+      qa_rework_limit: 2,
+      idempotency_key: "tz-cycle:qa-author-rework-test",
+      operator_input: {},
+      selected_agents: {
+        "author-codex": {
+          agentId: codexAgentId,
+          agentName: "Автор-Codex",
+          adapterType: "codex_local",
+          issueId: "codex-draft-issue",
+          issueIdentifier: "GER-149",
+          wakeupRunId: null,
+        },
+        "author-claude": {
+          agentId: claudeAgentId,
+          agentName: "Автор-Claude",
+          adapterType: "claude_local",
+          issueId: "claude-draft-issue",
+          issueIdentifier: "GER-150",
+          wakeupRunId: null,
+        },
+        synthesisRound2: {
+          cto: {
+            agentId: "cto-agent",
+            agentName: "CTO",
+            adapterType: "codex_local",
+            issueId: synthesisIssueId,
+            issueIdentifier: "GER-171",
+            wakeupRunId: null,
+          },
+        },
+        qaRound2: {
+          "qa-codex": {
+            agentId: qaCodexAgentId,
+            agentName: "QA",
+            adapterType: "codex_local",
+            issueId: qaCodexIssueId,
+            issueIdentifier: "GER-174",
+            wakeupRunId: null,
+          },
+          "qa-claude": {
+            agentId: qaClaudeAgentId,
+            agentName: "Claude QA",
+            adapterType: "claude_local",
+            issueId: qaClaudeIssueId,
+            issueIdentifier: "GER-175",
+            wakeupRunId: null,
+          },
+        },
+      },
+      started_at: now,
+      updated_at: now,
+      completed_at: null,
+    };
+    const originalQuery = harness.ctx.db.query.bind(harness.ctx.db);
+    harness.ctx.db.query = async <T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
+      if (sql.includes(".tz_process_runs") && sql.includes("qa_round_")) {
+        return [runRow] as T[];
+      }
+      return originalQuery(sql, params);
+    };
+
+    await harness.emit("issue.updated", {}, {
+      companyId,
+      entityType: "issue",
+      entityId: qaCodexIssueId,
+      actorType: "agent",
+      actorId: qaCodexAgentId,
+    });
+
+    const roundThreeIssues = await harness.ctx.issues.list({
+      companyId,
+      originKindPrefix: PING_PONG_ORIGIN_KIND,
+      includePluginOperations: true,
+      limit: 10,
+    });
+    expect(roundThreeIssues).toHaveLength(2);
+    expect(roundThreeIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: codexAgentId,
+        status: "todo",
+        originKind: PING_PONG_ORIGIN_KIND,
+        originId: `${runId}:author-codex:r3`,
+        title: "GER-118 раунд согласования 3: Автор-Codex закрывает QA-блокеры",
+      }),
+      expect.objectContaining({
+        parentId: rootIssueId,
+        assigneeAgentId: claudeAgentId,
+        status: "todo",
+        originKind: PING_PONG_ORIGIN_KIND,
+        originId: `${runId}:author-claude:r3`,
+        title: "GER-118 раунд согласования 3: Автор-Claude закрывает QA-блокеры",
+      }),
+    ]));
+    const descriptions = roundThreeIssues.map((entry) => entry.description).join("\n");
+    expect(descriptions).toContain("Это раунд согласования 3 после QA-проверки финального ТЗ");
+    expect(descriptions).toContain("Распознанный QA-вердикт Codex: blocked");
+    expect(descriptions).toContain("Распознанный QA-вердикт Claude: accepted");
+    expect(descriptions).toContain("Нужно согласовать transaction-bound success audit.");
+    expect(harness.dbExecutes.some((entry) =>
+      entry.params?.includes("ping_pong_round_3_dispatched"))).toBe(true);
+    expect(harness.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: "Раунд согласования 3 запущен: QA нашла блокеры для авторов",
+        entityId: rootIssueId,
+      }),
+    ]));
+  });
 });

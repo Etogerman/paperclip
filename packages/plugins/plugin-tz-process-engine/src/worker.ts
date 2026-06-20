@@ -169,6 +169,15 @@ type ParsedConvergenceVerdict = {
   raw: string;
 };
 
+type QaBlockerTarget = "synthesis" | "authors" | "operator";
+
+type ParsedQaVerdict = {
+  status: "accepted" | "blocked" | "unknown";
+  blockerTargets: QaBlockerTarget[];
+  blockerSummaries: string[];
+  raw: string;
+};
+
 type SelectedIssueDocument = {
   id: string;
   key: string;
@@ -365,6 +374,35 @@ function parseConvergenceVerdict(text: string): ParsedConvergenceVerdict {
     verdict: value === "СОШЛИСЬ" ? "converged" : "iterate",
     remainingDeltasEmpty,
     raw: tail,
+  };
+}
+
+function parseQaVerdict(text: string): ParsedQaVerdict {
+  const statusMatches = [...text.matchAll(/qa_status\s*:\s*`?\**\s*(ACCEPTED|BLOCKED)/giu)];
+  const lastStatus = statusMatches[statusMatches.length - 1]?.[1]?.toUpperCase();
+  const acceptedByText = /(?:вердикт|итоговый вердикт)\s*[:：]\s*(?:\*\*)?\s*ПРИНЯТО/iu.test(text)
+    || /блокеров\s+нет/iu.test(text);
+  const blockedByText = /(?:вердикт|итоговый вердикт)\s*[:：]\s*(?:\*\*)?\s*(?:ВОЗВРАЩЕНО|BLOCKED|НЕ\s+ПРИНЯТО)/iu.test(text)
+    || /нельзя\s+нести\s+на\s+ворота\s+оператора/iu.test(text);
+  const status = lastStatus === "ACCEPTED" || (!lastStatus && acceptedByText)
+    ? "accepted"
+    : lastStatus === "BLOCKED" || (!lastStatus && blockedByText)
+      ? "blocked"
+      : "unknown";
+  const blockerTargets = [...new Set(
+    [...text.matchAll(/target\s*:\s*`?\**\s*(synthesis|authors|operator)/giu)]
+      .map((match) => match[1]?.toLowerCase())
+      .filter((value): value is QaBlockerTarget =>
+        value === "synthesis" || value === "authors" || value === "operator"),
+  )];
+  const blockerSummaries = [...text.matchAll(/summary\s*:\s*["“]?([^"\n”]+)/giu)]
+    .map((match) => match[1]?.trim())
+    .filter((value): value is string => Boolean(value));
+  return {
+    status,
+    blockerTargets,
+    blockerSummaries,
+    raw: text,
   };
 }
 
@@ -590,6 +628,21 @@ async function findSynthesisIssueForRun(
   return findExistingSynthesisIssue(ctx, run.companyId, run, roundNumber);
 }
 
+async function findQaReviewIssueForReviewer(
+  ctx: PluginContext,
+  run: TzProcessRunSummary,
+  reviewer: QaReviewerDefinition,
+  roundNumber: number,
+) {
+  const selectedAgents = jsonObject(run.selectedAgents);
+  const selected = selectedAgentRecordFrom(jsonObject(selectedAgents[qaSelectedAgentsKey(roundNumber)])[reviewer.roleKey]);
+  if (selected.issueId) {
+    const selectedIssue = await ctx.issues.get(selected.issueId, run.companyId);
+    if (selectedIssue) return selectedIssue;
+  }
+  return findExistingQaReviewIssue(ctx, run.companyId, run, reviewer, roundNumber);
+}
+
 type CoreIssueCommentRow = {
   id: string;
   body: string;
@@ -667,6 +720,49 @@ async function selectDraftDocument(
   documents.sort((left, right) => scoreDraftDocument(right) - scoreDraftDocument(left));
   const document = documents[0];
   return document ? { issue, document, body: document.body } : selectDraftDocumentFromCoreTables(ctx, issue, companyId);
+}
+
+async function selectIssueOutputForDecision(
+  ctx: PluginContext,
+  issue: Issue,
+  companyId: string,
+): Promise<DraftDocumentSelection | null> {
+  const selected = await selectDraftDocument(ctx, issue, companyId);
+  const comments = await ctx.db.query<CoreIssueCommentRow>(
+    `SELECT id::text AS id,
+            body,
+            created_at::text AS created_at
+       FROM public.issue_comments
+      WHERE issue_id = $1
+        AND company_id = $2
+        AND COALESCE(body, '') <> ''
+        AND deleted_at IS NULL
+      ORDER BY created_at ASC
+      LIMIT 20`,
+    [issue.id, companyId],
+  );
+  const commentBody = comments
+    .map((comment) => comment.body.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  if (selected) {
+    return {
+      ...selected,
+      body: [selected.body, commentBody].filter(Boolean).join("\n\n"),
+    };
+  }
+  if (!commentBody) return null;
+  return {
+    issue,
+    document: {
+      id: `issue-comments-${issue.id}`,
+      key: "issue-comments",
+      title: "Issue comments",
+      latestRevisionId: null,
+      body: commentBody,
+    },
+    body: commentBody,
+  };
 }
 
 async function selectedOrFallbackAgent(
@@ -975,6 +1071,98 @@ function buildQaReviewPrompt(input: {
     "blockers:",
     "  - target: synthesis",
     "    summary: \"Синтез потерял согласованное требование.\"",
+    "```",
+  ].join("\n");
+}
+
+function buildQaAuthorReworkPrompt(input: {
+  issue: Issue;
+  run: TzProcessRunSummary;
+  author: DraftAuthorDefinition;
+  otherAuthor: DraftAuthorDefinition;
+  synthesis: DraftDocumentSelection;
+  codexQa: DraftDocumentSelection;
+  claudeQa: DraftDocumentSelection;
+  codexQaVerdict: ParsedQaVerdict;
+  claudeQaVerdict: ParsedQaVerdict;
+  roundNumber: number;
+}) {
+  return [
+    `Это раунд согласования ${input.roundNumber} после QA-проверки финального ТЗ.`,
+    "",
+    "Задача:",
+    "1. Изучи финальное ТЗ синтезатора.",
+    "2. Изучи оба QA-заключения.",
+    "3. Закрой блокеры, которые относятся к авторам или требуют пересогласования сути.",
+    "4. Предложи обновлённую версию ТЗ со своей стороны.",
+    "5. Пиши по-русски, заголовки тоже по-русски.",
+    "",
+    `Распознанный QA-вердикт Codex: ${input.codexQaVerdict.status}`,
+    `Распознанный QA-вердикт Claude: ${input.claudeQaVerdict.status}`,
+    "",
+    "Финальное ТЗ синтезатора:",
+    input.synthesis.body,
+    "",
+    "QA-Codex:",
+    input.codexQa.body,
+    "",
+    "QA-Claude:",
+    input.claudeQa.body,
+    "",
+    "Ответ заверши строго таким структурным блоком:",
+    "```yaml",
+    "review_of_qa:",
+    "  - \"...\"",
+    "accepted_points:",
+    "  - \"...\"",
+    "rejected_points:",
+    "  - \"...\"",
+    "remaining_deltas:",
+    "  - \"...\"",
+    "new_own_version: |",
+    "  ...",
+    "verdict: ИТЕРИРУЕМ",
+    "named_version:",
+    `  author: ${input.author.roleKey}`,
+    `  round: ${input.roundNumber}`,
+    "  document_id: null",
+    "  revision_id: null",
+    "```",
+    "",
+    "Если после доработки спорных пунктов не осталось, оставь remaining_deltas пустым и поставь verdict: СОШЛИСЬ.",
+  ].join("\n");
+}
+
+function buildQaSynthesisReworkPrompt(input: {
+  issue: Issue;
+  run: TzProcessRunSummary;
+  synthesis: DraftDocumentSelection;
+  codexQa: DraftDocumentSelection;
+  claudeQa: DraftDocumentSelection;
+  roundNumber: number;
+}) {
+  return [
+    `Нужно доработать финальное ТЗ после QA-проверки, раунд ${input.roundNumber}.`,
+    "",
+    "Задача:",
+    "1. Исправить блокеры, которые относятся к синтезу.",
+    "2. Не открывать заново спор авторов, если QA не требует этого явно.",
+    "3. Сохранить таблицу решений и причины.",
+    "4. Писать по-русски, заголовки тоже по-русски.",
+    "",
+    "Предыдущий синтез:",
+    input.synthesis.body,
+    "",
+    "QA-Codex:",
+    input.codexQa.body,
+    "",
+    "QA-Claude:",
+    input.claudeQa.body,
+    "",
+    "В конце добавь короткий блок:",
+    "```yaml",
+    "synthesis_status: READY_FOR_QA",
+    "open_operator_questions_count: 0",
     "```",
   ].join("\n");
 }
@@ -1322,6 +1510,30 @@ async function activeRunsForSynthesisIssue(
       ORDER BY updated_at ASC
       LIMIT 10`,
     [companyId, synthesisIssueId],
+  );
+  return rows.map(normalizeRun);
+}
+
+async function activeRunsForQaReviewIssue(
+  ctx: PluginContext,
+  companyId: string,
+  qaIssueId: string,
+): Promise<TzProcessRunSummary[]> {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE company_id = $1
+        AND status = 'qa'
+        AND state = ('qa_round_' || current_round::text || '_dispatched')
+        AND (
+          selected_agents #>> ARRAY['qaRound' || current_round::text, 'qa-codex', 'issueId'] = $2
+          OR selected_agents #>> ARRAY['qaRound' || current_round::text, 'qa-claude', 'issueId'] = $2
+        )
+      ORDER BY updated_at ASC
+      LIMIT 10`,
+    [companyId, qaIssueId],
   );
   return rows.map(normalizeRun);
 }
@@ -1717,6 +1929,86 @@ async function createOrReuseQaReviewIssue(
     billingCode: input.issue.billingCode,
     originKind: QA_REVIEW_ORIGIN_KIND,
     originId: qaReviewIssueOriginId(input.run.id, input.reviewer.roleKey, input.roundNumber),
+    originRunId: input.run.id,
+  });
+}
+
+async function createOrReuseQaAuthorReworkIssue(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary;
+    author: DraftAuthorDefinition;
+    otherAuthor: DraftAuthorDefinition;
+    agent: Agent;
+    synthesis: DraftDocumentSelection;
+    codexQa: DraftDocumentSelection;
+    claudeQa: DraftDocumentSelection;
+    codexQaVerdict: ParsedQaVerdict;
+    claudeQaVerdict: ParsedQaVerdict;
+    roundNumber: number;
+  },
+) {
+  const existing = await findExistingPingPongIssue(
+    ctx,
+    input.run.companyId,
+    input.run,
+    input.author,
+    input.roundNumber,
+  );
+  if (existing) return existing;
+
+  const rootLabel = input.issue.identifier ?? input.issue.title;
+  return ctx.issues.create({
+    companyId: input.run.companyId,
+    projectId: input.issue.projectId ?? undefined,
+    goalId: input.issue.goalId ?? undefined,
+    parentId: input.issue.id,
+    inheritExecutionWorkspaceFromIssueId: input.issue.id,
+    title: `${rootLabel} раунд согласования ${input.roundNumber}: ${input.author.displayName} закрывает QA-блокеры`,
+    description: buildQaAuthorReworkPrompt(input),
+    status: "todo",
+    priority: input.issue.priority ?? "medium",
+    assigneeAgentId: input.agent.id,
+    requestDepth: input.issue.requestDepth + 1,
+    billingCode: input.issue.billingCode,
+    originKind: PING_PONG_ORIGIN_KIND,
+    originId: pingPongIssueOriginId(input.run.id, input.author.roleKey, input.roundNumber),
+    originRunId: input.run.id,
+  });
+}
+
+async function createOrReuseQaSynthesisReworkIssue(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary;
+    agent: Agent;
+    synthesis: DraftDocumentSelection;
+    codexQa: DraftDocumentSelection;
+    claudeQa: DraftDocumentSelection;
+    roundNumber: number;
+  },
+) {
+  const existing = await findExistingSynthesisIssue(ctx, input.run.companyId, input.run, input.roundNumber);
+  if (existing) return existing;
+
+  const rootLabel = input.issue.identifier ?? input.issue.title;
+  return ctx.issues.create({
+    companyId: input.run.companyId,
+    projectId: input.issue.projectId ?? undefined,
+    goalId: input.issue.goalId ?? undefined,
+    parentId: input.issue.id,
+    inheritExecutionWorkspaceFromIssueId: input.issue.id,
+    title: `${rootLabel} Доработка финального ТЗ после QA, раунд ${input.roundNumber}`,
+    description: buildQaSynthesisReworkPrompt(input),
+    status: "todo",
+    priority: input.issue.priority ?? "medium",
+    assigneeAgentId: input.agent.id,
+    requestDepth: input.issue.requestDepth + 1,
+    billingCode: input.issue.billingCode,
+    originKind: SYNTHESIS_ORIGIN_KIND,
+    originId: synthesisIssueOriginId(input.run.id, input.roundNumber),
     originRunId: input.run.id,
   });
 }
@@ -2874,6 +3166,448 @@ async function dispatchQaReviewIfSynthesisReady(ctx: PluginContext, run: TzProce
   });
 }
 
+async function markRunNeedsOperatorForQaDecision(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    reason: string;
+    details: Record<string, unknown>;
+  },
+) {
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'needs_operator',
+            state = $3,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'qa'
+        AND state = $4`,
+    [input.run.id, input.run.companyId, input.reason, input.run.state],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "qa_decision_blocked",
+    payload: {
+      issueId: input.issue.id,
+      reason: input.reason,
+      ...input.details,
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "Движок процесса не смог автоматически принять решение после QA-проверки",
+    entityType: "issue",
+    entityId: input.issue.id,
+    metadata: {
+      runId: input.run.id,
+      reason: input.reason,
+      ...input.details,
+    },
+  });
+  await writeTraceDocument(ctx, input.issue.id, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "needs_operator",
+    state: input.reason,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function markRunFinalReadyFromQa(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    codexQaVerdict: ParsedQaVerdict;
+    claudeQaVerdict: ParsedQaVerdict;
+  },
+) {
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'final_ready',
+            state = 'operator_gate_ready',
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'qa'
+        AND state = $3`,
+    [input.run.id, input.run.companyId, input.run.state],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "final_ready_after_qa",
+    payload: {
+      issueId: input.issue.id,
+      codexQaStatus: input.codexQaVerdict.status,
+      claudeQaStatus: input.claudeQaVerdict.status,
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "Финальное ТЗ готово к воротам оператора: оба QA приняли синтез без блокеров",
+    entityType: "issue",
+    entityId: input.issue.id,
+    metadata: {
+      runId: input.run.id,
+    },
+  });
+  await writeTraceDocument(ctx, input.issue.id, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "final_ready",
+    state: "operator_gate_ready",
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchAuthorReworkFromQaDecision(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    synthesis: DraftDocumentSelection;
+    codexQa: DraftDocumentSelection;
+    claudeQa: DraftDocumentSelection;
+    codexQaVerdict: ParsedQaVerdict;
+    claudeQaVerdict: ParsedQaVerdict;
+  },
+) {
+  const codexAuthor = authorByRoleKey("author-codex");
+  const claudeAuthor = authorByRoleKey("author-claude");
+  if (!codexAuthor || !claudeAuthor) throw new Error("Draft author definitions are incomplete");
+  const codexAgent = await selectedOrFallbackAgent(ctx, input.run, codexAuthor);
+  const claudeAgent = await selectedOrFallbackAgent(ctx, input.run, claudeAuthor);
+  if (!codexAgent || !claudeAgent) {
+    await markRunNeedsOperatorForQaDecision(ctx, {
+      run: input.run,
+      issue: input.issue,
+      reason: "missing_authors_for_qa_rework",
+      details: {
+        codexAgentFound: Boolean(codexAgent),
+        claudeAgentFound: Boolean(claudeAgent),
+      },
+    });
+    return;
+  }
+
+  const roundNumber = input.run.currentRound + 1;
+  const tasks: PingPongTaskResult[] = [];
+  const codexIssue = await createOrReuseQaAuthorReworkIssue(ctx, {
+    ...input,
+    author: codexAuthor,
+    otherAuthor: claudeAuthor,
+    agent: codexAgent,
+    roundNumber,
+  });
+  tasks.push({
+    author: codexAuthor,
+    otherAuthor: claudeAuthor,
+    agent: codexAgent,
+    issue: codexIssue,
+    wakeupRunId: null,
+    roundNumber,
+  });
+  const claudeIssue = await createOrReuseQaAuthorReworkIssue(ctx, {
+    ...input,
+    author: claudeAuthor,
+    otherAuthor: codexAuthor,
+    agent: claudeAgent,
+    roundNumber,
+  });
+  tasks.push({
+    author: claudeAuthor,
+    otherAuthor: codexAuthor,
+    agent: claudeAgent,
+    issue: claudeIssue,
+    wakeupRunId: null,
+    roundNumber,
+  });
+
+  const wakeups = await ctx.issues.requestWakeups(
+    tasks.map((task) => task.issue.id),
+    input.run.companyId,
+    {
+      reason: `Движок ТЗ: запустить раунд согласования ${roundNumber} по QA-блокерам`,
+      contextSource: `tz_process_engine.qa_author_rework_r${roundNumber}`,
+      idempotencyKeyPrefix: `${input.run.id}:qa-author-rework-r${roundNumber}`,
+    },
+  );
+  const wakeupByIssueId = new Map(wakeups.map((wakeup) => [wakeup.issueId, wakeup.runId ?? null]));
+  for (const task of tasks) {
+    task.wakeupRunId = wakeupByIssueId.get(task.issue.id) ?? null;
+    await recordPingPongIssueArtifact(ctx, { run: input.run, ...task });
+  }
+
+  const previousSelectedAgents = jsonObject(input.run.selectedAgents);
+  const pingPongRound = Object.fromEntries(tasks.map((task) => [
+    task.author.roleKey,
+    {
+      agentId: task.agent.id,
+      agentName: task.agent.name,
+      adapterType: task.agent.adapterType,
+      issueId: task.issue.id,
+      issueIdentifier: task.issue.identifier ?? null,
+      wakeupRunId: task.wakeupRunId,
+    },
+  ]));
+  const selectedAgents = {
+    ...previousSelectedAgents,
+    [pingPongSelectedAgentsKey(roundNumber)]: pingPongRound,
+  };
+  const nextState = pingPongState(roundNumber);
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'iterating',
+            state = $3,
+            current_round = $4,
+            selected_agents = $5::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'qa'
+        AND state = $6`,
+    [input.run.id, input.run.companyId, nextState, roundNumber, JSON.stringify(selectedAgents), input.run.state],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: `qa_author_rework_round_${roundNumber}_tasks_created`,
+    payload: {
+      issueId: input.run.rootIssueId,
+      qaStatuses: {
+        codex: input.codexQaVerdict.status,
+        claude: input.claudeQaVerdict.status,
+      },
+      tasks: tasks.map((task) => ({
+        roleKey: task.author.roleKey,
+        author: task.author.displayName,
+        agentId: task.agent.id,
+        agentName: task.agent.name,
+        adapterType: task.agent.adapterType,
+        issueId: task.issue.id,
+        issueIdentifier: task.issue.identifier ?? null,
+        wakeupRunId: task.wakeupRunId,
+      })),
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: `Раунд согласования ${roundNumber} запущен: QA нашла блокеры для авторов`,
+    entityType: "issue",
+    entityId: input.run.rootIssueId,
+    metadata: {
+      runId: input.run.id,
+      pingPongIssueIds: tasks.map((task) => task.issue.id),
+    },
+  });
+  await writeTraceDocument(ctx, input.run.rootIssueId, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "iterating",
+    state: nextState,
+    currentRound: roundNumber,
+    selectedAgents,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchSynthesisReworkFromQaDecision(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    synthesis: DraftDocumentSelection;
+    codexQa: DraftDocumentSelection;
+    claudeQa: DraftDocumentSelection;
+  },
+) {
+  const agents = await ctx.agents.list({ companyId: input.run.companyId, limit: 200 });
+  const ctoAgent = selectCtoAgent(agents);
+  if (!ctoAgent) {
+    await markRunNeedsOperatorForQaDecision(ctx, {
+      run: input.run,
+      issue: input.issue,
+      reason: "missing_cto_agent_for_qa_synthesis_rework",
+      details: {},
+    });
+    return;
+  }
+  const roundNumber = input.run.currentRound + 1;
+  const synthesisIssue = await createOrReuseQaSynthesisReworkIssue(ctx, {
+    ...input,
+    agent: ctoAgent,
+    roundNumber,
+  });
+  const wakeups = await ctx.issues.requestWakeups([synthesisIssue.id], input.run.companyId, {
+    reason: `Движок ТЗ: запустить доработку синтеза после QA, раунд ${roundNumber}`,
+    contextSource: `tz_process_engine.qa_synthesis_rework_r${roundNumber}`,
+    idempotencyKeyPrefix: `${input.run.id}:qa-synthesis-rework-r${roundNumber}`,
+  });
+  const wakeupRunId = wakeups[0]?.runId ?? null;
+  await recordSynthesisIssueArtifact(ctx, {
+    run: input.run,
+    agent: ctoAgent,
+    issue: synthesisIssue,
+    wakeupRunId,
+    roundNumber,
+  });
+
+  const previousSelectedAgents = jsonObject(input.run.selectedAgents);
+  const selectedAgents = {
+    ...previousSelectedAgents,
+    [synthesisSelectedAgentsKey(roundNumber)]: {
+      cto: {
+        agentId: ctoAgent.id,
+        agentName: ctoAgent.name,
+        adapterType: ctoAgent.adapterType,
+        issueId: synthesisIssue.id,
+        issueIdentifier: synthesisIssue.identifier ?? null,
+        wakeupRunId,
+      },
+    },
+  };
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'synthesizing',
+            state = 'cto_synthesis_dispatched',
+            current_round = $3,
+            selected_agents = $4::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'qa'
+        AND state = $5`,
+    [input.run.id, input.run.companyId, roundNumber, JSON.stringify(selectedAgents), input.run.state],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: `qa_synthesis_rework_round_${roundNumber}_task_created`,
+    payload: {
+      issueId: input.run.rootIssueId,
+      synthesisIssueId: synthesisIssue.id,
+      synthesisIssueIdentifier: synthesisIssue.identifier ?? null,
+      wakeupRunId,
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: `Доработка синтеза после QA запущена, раунд ${roundNumber}`,
+    entityType: "issue",
+    entityId: input.run.rootIssueId,
+    metadata: {
+      runId: input.run.id,
+      synthesisIssueId: synthesisIssue.id,
+      wakeupRunId,
+    },
+  });
+  await writeTraceDocument(ctx, input.run.rootIssueId, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "synthesizing",
+    state: "cto_synthesis_dispatched",
+    currentRound: roundNumber,
+    selectedAgents,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function dispatchQaDecisionIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
+  const roundNumber = run.currentRound;
+  if (run.status !== "qa" || run.state !== qaState(roundNumber)) return;
+
+  const issue = await ctx.issues.get(run.rootIssueId, run.companyId);
+  if (!issue) throw new Error(`Issue not found: ${run.rootIssueId}`);
+
+  const codexReviewer = QA_REVIEWERS.find((reviewer) => reviewer.roleKey === "qa-codex");
+  const claudeReviewer = QA_REVIEWERS.find((reviewer) => reviewer.roleKey === "qa-claude");
+  if (!codexReviewer || !claudeReviewer) throw new Error("QA reviewer definitions are incomplete");
+
+  const codexQaIssue = await findQaReviewIssueForReviewer(ctx, run, codexReviewer, roundNumber);
+  const claudeQaIssue = await findQaReviewIssueForReviewer(ctx, run, claudeReviewer, roundNumber);
+  if (!codexQaIssue || !claudeQaIssue) {
+    await markRunNeedsOperatorForQaDecision(ctx, {
+      run,
+      issue,
+      reason: "missing_qa_review_issues",
+      details: {
+        codexQaIssueId: codexQaIssue?.id ?? null,
+        claudeQaIssueId: claudeQaIssue?.id ?? null,
+      },
+    });
+    return;
+  }
+  if (codexQaIssue.status !== "done" || claudeQaIssue.status !== "done") return;
+
+  const synthesisIssue = await findSynthesisIssueForRun(ctx, run, roundNumber);
+  const synthesis = synthesisIssue ? await selectIssueOutputForDecision(ctx, synthesisIssue, run.companyId) : null;
+  const codexQa = await selectIssueOutputForDecision(ctx, codexQaIssue, run.companyId);
+  const claudeQa = await selectIssueOutputForDecision(ctx, claudeQaIssue, run.companyId);
+  if (!synthesis || !codexQa || !claudeQa) {
+    await markRunNeedsOperatorForQaDecision(ctx, {
+      run,
+      issue,
+      reason: "missing_qa_decision_documents",
+      details: {
+        synthesisIssueFound: Boolean(synthesisIssue),
+        synthesisFound: Boolean(synthesis),
+        codexQaFound: Boolean(codexQa),
+        claudeQaFound: Boolean(claudeQa),
+      },
+    });
+    return;
+  }
+
+  const codexQaVerdict = parseQaVerdict(codexQa.body);
+  const claudeQaVerdict = parseQaVerdict(claudeQa.body);
+  if (codexQaVerdict.status === "unknown" || claudeQaVerdict.status === "unknown") {
+    await markRunNeedsOperatorForQaDecision(ctx, {
+      run,
+      issue,
+      reason: "unparseable_qa_verdict",
+      details: {
+        codexQaStatus: codexQaVerdict.status,
+        claudeQaStatus: claudeQaVerdict.status,
+      },
+    });
+    return;
+  }
+
+  const allTargets = [...new Set([...codexQaVerdict.blockerTargets, ...claudeQaVerdict.blockerTargets])];
+  const hasBlocked = codexQaVerdict.status === "blocked" || claudeQaVerdict.status === "blocked";
+  if (!hasBlocked && allTargets.length === 0) {
+    await markRunFinalReadyFromQa(ctx, { run, issue, codexQaVerdict, claudeQaVerdict });
+    return;
+  }
+  if (allTargets.includes("authors")) {
+    await dispatchAuthorReworkFromQaDecision(ctx, {
+      run,
+      issue,
+      synthesis,
+      codexQa,
+      claudeQa,
+      codexQaVerdict,
+      claudeQaVerdict,
+    });
+    return;
+  }
+  if (allTargets.includes("synthesis")) {
+    await dispatchSynthesisReworkFromQaDecision(ctx, { run, issue, synthesis, codexQa, claudeQa });
+    return;
+  }
+  await markRunNeedsOperatorForQaDecision(ctx, {
+    run,
+    issue,
+    reason: "qa_blockers_need_operator",
+    details: {
+      codexQaStatus: codexQaVerdict.status,
+      claudeQaStatus: claudeQaVerdict.status,
+      blockerTargets: allTargets,
+      blockerSummaries: [...codexQaVerdict.blockerSummaries, ...claudeQaVerdict.blockerSummaries],
+    },
+  });
+}
+
 async function dispatchConvergenceDecisionIfReady(ctx: PluginContext, run: TzProcessRunSummary) {
   const roundNumber = run.currentRound;
   if (run.status !== "iterating" || run.state !== convergenceCheckState(roundNumber)) return;
@@ -3387,6 +4121,40 @@ async function resumeReadyQaReviewRuns(ctx: PluginContext) {
   }
 }
 
+async function resumeReadyQaDecisionRuns(ctx: PluginContext) {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE status = 'qa'
+        AND state = ('qa_round_' || current_round::text || '_dispatched')
+      ORDER BY updated_at ASC
+      LIMIT 20`,
+  );
+  for (const row of rows) {
+    const run = normalizeRun(row);
+    try {
+      await dispatchQaDecisionIfReady(ctx, run);
+    } catch (err) {
+      await appendEvent(ctx, {
+        runId: run.id,
+        companyId: run.companyId,
+        eventType: "qa_decision_dispatch_failed",
+        payload: {
+          issueId: run.rootIssueId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+      ctx.logger.error("Failed to resume TZ QA decision dispatch", {
+        runId: run.id,
+        issueId: run.rootIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) {
   const issueId = typeof event.entityId === "string" ? event.entityId : null;
   if (!issueId) return;
@@ -3403,6 +4171,9 @@ async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) 
   for (const run of await activeRunsForSynthesisIssue(ctx, event.companyId, issueId)) {
     runsById.set(run.id, run);
   }
+  for (const run of await activeRunsForQaReviewIssue(ctx, event.companyId, issueId)) {
+    runsById.set(run.id, run);
+  }
   const runs = [...runsById.values()];
   for (const run of runs) {
     try {
@@ -3410,6 +4181,7 @@ async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) 
       await dispatchConvergenceCheckIfReady(ctx, run);
       await dispatchConvergenceDecisionIfReady(ctx, run);
       await dispatchQaReviewIfSynthesisReady(ctx, run);
+      await dispatchQaDecisionIfReady(ctx, run);
     } catch (err) {
       await appendEvent(ctx, {
         runId: run.id,
@@ -3498,6 +4270,7 @@ const plugin = definePlugin({
     await resumeReadyConvergenceCheckRuns(ctx);
     await resumeReadyConvergenceDecisionRuns(ctx);
     await resumeReadyQaReviewRuns(ctx);
+    await resumeReadyQaDecisionRuns(ctx);
   },
 
   async onApiRequest(input: PluginApiRequestInput) {
