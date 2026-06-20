@@ -7,14 +7,48 @@ import {
   type PluginEvent,
   type PluginPerformActionContext,
 } from "@paperclipai/plugin-sdk";
+import type {
+  Agent,
+  Issue,
+  IssueThreadInteraction,
+} from "@paperclipai/shared";
 import {
   CLARIFICATION_INTERACTION_KEY,
   DEFAULT_MAX_ROUNDS,
   DEFAULT_QA_REWORK_LIMIT,
+  BLIND_DRAFT_ARTIFACT_KEY,
+  BLIND_DRAFT_ORIGIN_KIND,
   PROCESS_KEY,
   TRACE_DOCUMENT_KEY,
   type TzProcessStatus,
 } from "./constants.js";
+
+type DraftAuthorRoleKey = "author-codex" | "author-claude";
+
+type DraftAuthorDefinition = {
+  roleKey: DraftAuthorRoleKey;
+  displayName: string;
+  adapterType: "codex_local" | "claude_local";
+  title: string;
+  exactNames: string[];
+};
+
+const DRAFT_AUTHORS: DraftAuthorDefinition[] = [
+  {
+    roleKey: "author-codex",
+    displayName: "Автор-Codex",
+    adapterType: "codex_local",
+    title: "Автор-Codex",
+    exactNames: ["Автор-Codex", "Автор-GPT", "Author-Codex", "Author-GPT"],
+  },
+  {
+    roleKey: "author-claude",
+    displayName: "Автор-Claude",
+    adapterType: "claude_local",
+    title: "Автор-Claude",
+    exactNames: ["Автор-Claude", "Author-Claude"],
+  },
+];
 
 type TzProcessRunRow = {
   id: string;
@@ -66,6 +100,13 @@ type TzProcessStatusResult = {
   }>;
 };
 
+type DraftTaskResult = {
+  author: DraftAuthorDefinition;
+  agent: Agent;
+  issue: Issue;
+  wakeupRunId: string | null;
+};
+
 type StartCycleInput = {
   companyId: string;
   issueId: string;
@@ -99,6 +140,170 @@ function jsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function jsonArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function agentIsUsable(agent: Agent) {
+  return agent.status !== "terminated" && agent.status !== "paused" && agent.status !== "pending_approval";
+}
+
+function normalizeAgentName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function selectAuthorAgent(agents: Agent[], definition: DraftAuthorDefinition): Agent | null {
+  const usable = agents.filter((agent) => agentIsUsable(agent) && agent.adapterType === definition.adapterType);
+  const exactNames = new Set(definition.exactNames.map(normalizeAgentName));
+  return usable.find((agent) => exactNames.has(normalizeAgentName(agent.name)))
+    ?? usable.find((agent) => normalizeAgentName(agent.name).includes("автор"))
+    ?? usable[0]
+    ?? null;
+}
+
+function draftIssueOriginId(runId: string, roleKey: DraftAuthorRoleKey, roundNumber = 0) {
+  return `${runId}:${roleKey}:r${roundNumber}`;
+}
+
+function operatorAnswerSummary(interaction: IssueThreadInteraction | null) {
+  const result = jsonObject(interaction?.result);
+  const answers = jsonArray(result.answers);
+  if (answers.length === 0) return "Оператор не дал дополнительных уточнений.";
+
+  return answers.map((answer, index) => {
+    const record = jsonObject(answer);
+    const questionId = stringField(record.questionId) ?? `question_${index + 1}`;
+    const optionIds = jsonArray(record.optionIds)
+      .map((item) => typeof item === "string" ? item : null)
+      .filter((item): item is string => Boolean(item));
+    const otherText = stringField(record.otherText);
+    const parts = [
+      optionIds.length > 0 ? `варианты: ${optionIds.join(", ")}` : null,
+      otherText ? `текст: ${otherText}` : null,
+    ].filter((part): part is string => Boolean(part));
+    return `- ${questionId}: ${parts.length > 0 ? parts.join("; ") : "без ответа"}`;
+  }).join("\n");
+}
+
+function buildBlindDraftPrompt(input: {
+  issue: Issue;
+  run: TzProcessRunSummary;
+  author: DraftAuthorDefinition;
+  clarificationInteraction: IssueThreadInteraction | null;
+}) {
+  const operatorInput = jsonObject(input.run.operatorInput);
+  const task = stringField(operatorInput.task) ?? input.issue.title;
+  const context = stringField(operatorInput.context) ?? input.issue.description ?? "Дополнительный контекст не указан.";
+  const projectId = stringField(operatorInput.projectId) ?? input.issue.projectId ?? "не указан";
+  const answers = operatorAnswerSummary(input.clarificationInteraction);
+
+  return [
+    `Ты ${input.author.title}. Это слепой раунд 0 создания ТЗ.`,
+    "",
+    "Правила:",
+    "- Пиши свою независимую версию ТЗ.",
+    "- Не запрашивай и не используй черновик второго автора.",
+    "- Пиши по-русски, заголовки тоже по-русски.",
+    "- Не меняй код и не деплой ничего. Сейчас нужна только версия ТЗ.",
+    "- Если данных не хватает, явно вынеси открытые вопросы оператору.",
+    "",
+    "Исходная задача:",
+    task,
+    "",
+    "Контекст:",
+    context,
+    "",
+    `Проект: ${projectId}`,
+    "",
+    "Ответы оператора на уточняющие вопросы:",
+    answers,
+    "",
+    "Сформируй документ ТЗ со структурой:",
+    "1. Цель",
+    "2. Контекст",
+    "3. Границы MVP",
+    "4. Функциональные требования",
+    "5. Нефункциональные требования",
+    "6. Сценарии работы",
+    "7. Ограничения и риски",
+    "8. Критерии приёмки",
+    "9. План проверки",
+    "10. Открытые вопросы",
+    "",
+    "В конце добавь короткий блок:",
+    "Вердикт: ГОТОВ К ПИНГ-ПОНГУ",
+  ].join("\n");
+}
+
+async function findClarificationInteraction(
+  ctx: PluginContext,
+  issueId: string,
+  companyId: string,
+  runId: string,
+) {
+  const interactions = await ctx.issues.interactions.list(issueId, companyId, {
+    kind: "ask_user_questions",
+    limit: 20,
+  });
+  return interactions.find((interaction) =>
+    interaction.idempotencyKey === clarificationInteractionIdempotencyKey(runId)) ?? null;
+}
+
+async function findExistingDraftIssue(
+  ctx: PluginContext,
+  companyId: string,
+  run: TzProcessRunSummary,
+  author: DraftAuthorDefinition,
+) {
+  const existing = await ctx.issues.list({
+    companyId,
+    originKind: BLIND_DRAFT_ORIGIN_KIND,
+    originId: draftIssueOriginId(run.id, author.roleKey),
+    includePluginOperations: true,
+    limit: 1,
+  });
+  return existing[0] ?? null;
+}
+
+async function recordDraftIssueArtifact(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    author: DraftAuthorDefinition;
+    agent: Agent;
+    issue: Issue;
+    wakeupRunId: string | null;
+  },
+) {
+  await ctx.db.execute(
+    `INSERT INTO ${tableName(ctx, "tz_process_artifacts")}
+       (id, run_id, company_id, role_key, round_number, artifact_key, visibility, content, metadata)
+     VALUES ($1, $2, $3, $4, 0, $5, 'public', $6, $7::jsonb)
+     ON CONFLICT (run_id, role_key, round_number, artifact_key) DO UPDATE SET
+       content = EXCLUDED.content,
+       metadata = EXCLUDED.metadata,
+       updated_at = now()`,
+    [
+      randomUUID(),
+      input.run.id,
+      input.run.companyId,
+      input.author.roleKey,
+      BLIND_DRAFT_ARTIFACT_KEY,
+      input.issue.description ?? "",
+      JSON.stringify({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier ?? null,
+        issueTitle: input.issue.title,
+        author: input.author.displayName,
+        agentId: input.agent.id,
+        agentName: input.agent.name,
+        adapterType: input.agent.adapterType,
+        wakeupRunId: input.wakeupRunId,
+      }),
+    ],
+  );
 }
 
 function normalizeRun(row: TzProcessRunRow): TzProcessRunSummary {
@@ -306,6 +511,218 @@ async function createClarificationInteraction(ctx: PluginContext, issueId: strin
   }, companyId);
 }
 
+async function markRunNeedsOperatorForMissingAuthors(
+  ctx: PluginContext,
+  input: {
+    run: TzProcessRunSummary;
+    issue: Issue;
+    missingAuthors: DraftAuthorDefinition[];
+  },
+) {
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'needs_operator',
+            state = 'missing_required_author_agents',
+            updated_at = now()
+      WHERE id = $1 AND company_id = $2`,
+    [input.run.id, input.run.companyId],
+  );
+  await appendEvent(ctx, {
+    runId: input.run.id,
+    companyId: input.run.companyId,
+    eventType: "drafting_blocked_missing_agents",
+    payload: {
+      issueId: input.issue.id,
+      missingAuthors: input.missingAuthors.map((author) => ({
+        roleKey: author.roleKey,
+        displayName: author.displayName,
+        adapterType: author.adapterType,
+      })),
+    },
+  });
+  await ctx.activity.log({
+    companyId: input.run.companyId,
+    message: "Процесс создания ТЗ остановлен: не найдены обязательные авторы",
+    entityType: "issue",
+    entityId: input.issue.id,
+    metadata: {
+      runId: input.run.id,
+      missingAuthors: input.missingAuthors.map((author) => author.displayName),
+    },
+  });
+  await writeTraceDocument(ctx, input.issue.id, input.run.companyId, input.issue.title, {
+    ...input.run,
+    status: "needs_operator",
+    state: "missing_required_author_agents",
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function createOrReuseDraftIssue(
+  ctx: PluginContext,
+  input: {
+    issue: Issue;
+    run: TzProcessRunSummary;
+    author: DraftAuthorDefinition;
+    agent: Agent;
+    clarificationInteraction: IssueThreadInteraction | null;
+  },
+) {
+  const existing = await findExistingDraftIssue(ctx, input.run.companyId, input.run, input.author);
+  if (existing) return existing;
+
+  const rootLabel = input.issue.identifier ?? input.issue.title;
+  return ctx.issues.create({
+    companyId: input.run.companyId,
+    projectId: input.issue.projectId ?? undefined,
+    goalId: input.issue.goalId ?? undefined,
+    parentId: input.issue.id,
+    inheritExecutionWorkspaceFromIssueId: input.issue.id,
+    title: `${rootLabel} blind round 0: черновик ТЗ от ${input.author.displayName}`,
+    description: buildBlindDraftPrompt(input),
+    status: "todo",
+    priority: input.issue.priority ?? "medium",
+    assigneeAgentId: input.agent.id,
+    requestDepth: input.issue.requestDepth + 1,
+    billingCode: input.issue.billingCode,
+    originKind: BLIND_DRAFT_ORIGIN_KIND,
+    originId: draftIssueOriginId(input.run.id, input.author.roleKey),
+    originRunId: input.run.id,
+  });
+}
+
+async function reopenRootIssueForDrafting(ctx: PluginContext, issue: Issue, run: TzProcessRunSummary) {
+  if (issue.status !== "done") return issue;
+  const nextStatus = issue.assigneeAgentId || issue.assigneeUserId ? "in_progress" : "todo";
+  const updated = await ctx.issues.update(issue.id, { status: nextStatus }, run.companyId);
+  await appendEvent(ctx, {
+    runId: run.id,
+    companyId: run.companyId,
+    eventType: "root_issue_reopened_for_drafting",
+    payload: {
+      issueId: issue.id,
+      previousStatus: issue.status,
+      nextStatus,
+    },
+  });
+  return updated;
+}
+
+async function dispatchBlindDraftTasks(ctx: PluginContext, run: TzProcessRunSummary) {
+  if (run.status !== "drafting" || run.state !== "ready_for_blind_drafting") return;
+
+  const issue = await ctx.issues.get(run.rootIssueId, run.companyId);
+  if (!issue) throw new Error(`Issue not found: ${run.rootIssueId}`);
+
+  const agents = await ctx.agents.list({ companyId: run.companyId, limit: 200 });
+  const selected = DRAFT_AUTHORS.map((author) => ({
+    author,
+    agent: selectAuthorAgent(agents, author),
+  }));
+  const missingAuthors = selected
+    .filter((entry): entry is { author: DraftAuthorDefinition; agent: null } => entry.agent === null)
+    .map((entry) => entry.author);
+  if (missingAuthors.length > 0) {
+    await markRunNeedsOperatorForMissingAuthors(ctx, { run, issue, missingAuthors });
+    return;
+  }
+
+  const activeIssue = await reopenRootIssueForDrafting(ctx, issue, run);
+  const clarificationInteraction = await findClarificationInteraction(ctx, run.rootIssueId, run.companyId, run.id);
+  const draftTasks: DraftTaskResult[] = [];
+
+  for (const entry of selected) {
+    if (!entry.agent) continue;
+    const draftIssue = await createOrReuseDraftIssue(ctx, {
+      issue: activeIssue,
+      run,
+      author: entry.author,
+      agent: entry.agent,
+      clarificationInteraction,
+    });
+    draftTasks.push({
+      author: entry.author,
+      agent: entry.agent,
+      issue: draftIssue,
+      wakeupRunId: null,
+    });
+  }
+
+  const wakeups = await ctx.issues.requestWakeups(
+    draftTasks.map((task) => task.issue.id),
+    run.companyId,
+    {
+      reason: "TZ Process Engine: запустить слепой раунд 0",
+      contextSource: "tz_process_engine.blind_draft_r0",
+      idempotencyKeyPrefix: `${run.id}:blind-draft-r0`,
+    },
+  );
+  const wakeupByIssueId = new Map(wakeups.map((wakeup) => [wakeup.issueId, wakeup.runId ?? null]));
+  for (const task of draftTasks) {
+    task.wakeupRunId = wakeupByIssueId.get(task.issue.id) ?? null;
+    await recordDraftIssueArtifact(ctx, { run, ...task });
+  }
+
+  const selectedAgents = Object.fromEntries(draftTasks.map((task) => [
+    task.author.roleKey,
+    {
+      agentId: task.agent.id,
+      agentName: task.agent.name,
+      adapterType: task.agent.adapterType,
+      issueId: task.issue.id,
+      issueIdentifier: task.issue.identifier ?? null,
+      wakeupRunId: task.wakeupRunId,
+    },
+  ]));
+  await ctx.db.execute(
+    `UPDATE ${tableName(ctx, "tz_process_runs")}
+        SET status = 'drafting',
+            state = 'blind_draft_tasks_dispatched',
+            selected_agents = $3::jsonb,
+            updated_at = now()
+      WHERE id = $1
+        AND company_id = $2
+        AND status = 'drafting'
+        AND state = 'ready_for_blind_drafting'`,
+    [run.id, run.companyId, JSON.stringify(selectedAgents)],
+  );
+  await appendEvent(ctx, {
+    runId: run.id,
+    companyId: run.companyId,
+    eventType: "blind_draft_tasks_created",
+    payload: {
+      issueId: run.rootIssueId,
+      tasks: draftTasks.map((task) => ({
+        roleKey: task.author.roleKey,
+        author: task.author.displayName,
+        agentId: task.agent.id,
+        agentName: task.agent.name,
+        adapterType: task.agent.adapterType,
+        issueId: task.issue.id,
+        issueIdentifier: task.issue.identifier ?? null,
+        wakeupRunId: task.wakeupRunId,
+      })),
+    },
+  });
+  await ctx.activity.log({
+    companyId: run.companyId,
+    message: "Слепой раунд 0 запущен: созданы задачи для Автор-Codex и Автор-Claude",
+    entityType: "issue",
+    entityId: run.rootIssueId,
+    metadata: {
+      runId: run.id,
+      draftIssueIds: draftTasks.map((task) => task.issue.id),
+    },
+  });
+  await writeTraceDocument(ctx, run.rootIssueId, run.companyId, activeIssue.title, {
+    ...run,
+    status: "drafting",
+    state: "blind_draft_tasks_dispatched",
+    selectedAgents,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 async function buildStatus(
   ctx: PluginContext,
   companyId: string,
@@ -488,12 +905,48 @@ async function recordInteractionResolution(ctx: PluginContext, event: PluginEven
 
   const issue = await ctx.issues.get(issueId, event.companyId);
   if (issue) {
-    await writeTraceDocument(ctx, issueId, event.companyId, issue.title, {
+    const draftingRun = {
       ...run,
       status: "drafting",
       state: "ready_for_blind_drafting",
       updatedAt: new Date().toISOString(),
-    });
+    } satisfies TzProcessRunSummary;
+    await writeTraceDocument(ctx, issueId, event.companyId, issue.title, draftingRun);
+    await dispatchBlindDraftTasks(ctx, draftingRun);
+  }
+}
+
+async function resumeReadyDraftingRuns(ctx: PluginContext) {
+  const rows = await ctx.db.query<TzProcessRunRow>(
+    `SELECT id, company_id, root_issue_id, process_key, status, state, current_round, max_rounds,
+            qa_rework_limit, idempotency_key, operator_input, selected_agents,
+            started_at, updated_at, completed_at
+       FROM ${tableName(ctx, "tz_process_runs")}
+      WHERE status = 'drafting'
+        AND state = 'ready_for_blind_drafting'
+      ORDER BY updated_at ASC
+      LIMIT 20`,
+  );
+  for (const row of rows) {
+    const run = normalizeRun(row);
+    try {
+      await dispatchBlindDraftTasks(ctx, run);
+    } catch (err) {
+      await appendEvent(ctx, {
+        runId: run.id,
+        companyId: run.companyId,
+        eventType: "blind_draft_dispatch_failed",
+        payload: {
+          issueId: run.rootIssueId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+      ctx.logger.error("Failed to resume TZ blind draft dispatch", {
+        runId: run.id,
+        issueId: run.rootIssueId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 }
 
@@ -556,6 +1009,8 @@ const plugin = definePlugin({
       if (!companyId || !issueId) throw new Error("companyId and issueId are required");
       return buildStatus(ctx, companyId, issueId);
     });
+
+    await resumeReadyDraftingRuns(ctx);
   },
 
   async onApiRequest(input: PluginApiRequestInput) {
