@@ -1,7 +1,16 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { Agent, Issue, IssueAttachment, IssueTreeControlPreview, IssueTreeHold, IssueWorkProduct } from "@paperclipai/shared";
+import type {
+  Agent,
+  AskUserQuestionsInteraction,
+  Issue,
+  IssueAttachment,
+  IssueTreeControlPreview,
+  IssueTreeHold,
+  IssueWorkProduct,
+  RequestConfirmationInteraction,
+} from "@paperclipai/shared";
 import type { AnchorHTMLAttributes, ButtonHTMLAttributes, ReactNode } from "react";
 import { NavigationType } from "react-router-dom";
 import { flushSync } from "react-dom";
@@ -14,6 +23,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   list: vi.fn(),
   listAcceptedPlanDecompositions: vi.fn(),
   listComments: vi.fn(),
+  listInteractions: vi.fn(),
   listAttachments: vi.fn(),
   listWorkProducts: vi.fn(),
   listFeedbackVotes: vi.fn(),
@@ -27,6 +37,10 @@ const mockIssuesApi = vi.hoisted(() => ({
   archiveFromInbox: vi.fn(),
   addComment: vi.fn(),
   cancelComment: vi.fn(),
+  acceptInteraction: vi.fn(),
+  rejectInteraction: vi.fn(),
+  cancelInteraction: vi.fn(),
+  respondToInteraction: vi.fn(),
   upsertFeedbackVote: vi.fn(),
   uploadAttachment: vi.fn(),
   deleteAttachment: vi.fn(),
@@ -270,6 +284,16 @@ vi.mock("../components/IssueChatThreadClassic", () => ({
   },
 }));
 
+vi.mock("../components/IssueThreadInteractionCard", () => ({
+  IssueThreadInteractionCard: ({ interaction }: {
+    interaction: { title?: string | null; payload?: { title?: string | null } };
+  }) => (
+    <div data-testid="pending-operator-interaction-card">
+      {interaction.title ?? interaction.payload?.title ?? "Untitled interaction"}
+    </div>
+  ),
+}));
+
 vi.mock("../components/IssueDocumentsSection", () => ({
   IssueDocumentsSection: () => <div>Documents</div>,
 }));
@@ -467,6 +491,75 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     documentSummaries: [],
     ...overrides,
   } as Issue;
+}
+
+function createQuestionInteraction(
+  overrides: Partial<AskUserQuestionsInteraction> = {},
+): AskUserQuestionsInteraction {
+  return {
+    id: "question-interaction-1",
+    companyId: "company-1",
+    issueId: "issue-1",
+    kind: "ask_user_questions",
+    title: "Уточнить задачу перед созданием ТЗ",
+    summary: "Ответьте один раз.",
+    status: "pending",
+    continuationPolicy: "wake_assignee",
+    createdByAgentId: "agent-1",
+    createdByUserId: null,
+    resolvedByAgentId: null,
+    resolvedByUserId: null,
+    createdAt: new Date("2026-06-20T10:00:00.000Z"),
+    updatedAt: new Date("2026-06-20T10:00:00.000Z"),
+    resolvedAt: null,
+    payload: {
+      version: 1,
+      title: "Уточнить задачу перед созданием ТЗ",
+      submitLabel: "Отправить ответы",
+      questions: [
+        {
+          id: "goal",
+          prompt: "Что нужно получить на выходе?",
+          selectionMode: "single",
+          required: true,
+          options: [
+            { id: "mvp", label: "MVP" },
+            { id: "full", label: "Полная версия" },
+          ],
+        },
+      ],
+    },
+    result: null,
+    ...overrides,
+  };
+}
+
+function createConfirmationInteraction(
+  overrides: Partial<RequestConfirmationInteraction> = {},
+): RequestConfirmationInteraction {
+  return {
+    id: "confirmation-interaction-1",
+    companyId: "company-1",
+    issueId: "issue-1",
+    kind: "request_confirmation",
+    title: "Принять финальное ТЗ GER-118",
+    summary: null,
+    status: "pending",
+    continuationPolicy: "wake_assignee",
+    createdByAgentId: "agent-1",
+    createdByUserId: null,
+    resolvedByAgentId: null,
+    resolvedByUserId: null,
+    createdAt: new Date("2026-06-19T10:00:00.000Z"),
+    updatedAt: new Date("2026-06-19T10:00:00.000Z"),
+    resolvedAt: null,
+    payload: {
+      version: 1,
+      prompt: "Принять финальное ТЗ?",
+    },
+    result: null,
+    ...overrides,
+  };
 }
 
 function createAttachment(overrides: Partial<IssueAttachment> & { id: string }): IssueAttachment {
@@ -928,6 +1021,7 @@ describe("IssueDetail", () => {
 
     mockIssuesApi.list.mockResolvedValue([]);
     mockIssuesApi.listComments.mockResolvedValue([]);
+    mockIssuesApi.listInteractions.mockResolvedValue([]);
     mockIssuesApi.listAttachments.mockResolvedValue([]);
     mockIssuesApi.listWorkProducts.mockResolvedValue([]);
     mockIssuesApi.listFeedbackVotes.mockResolvedValue([]);
@@ -1000,6 +1094,30 @@ describe("IssueDetail", () => {
         String(call[0]).includes("React has detected a change in the order of Hooks"),
       ),
     ).toBe(false);
+  });
+
+  it("surfaces pending operator questions above the issue tabs", async () => {
+    mockIssuesApi.get.mockResolvedValue(createIssue());
+    mockIssuesApi.listInteractions.mockResolvedValue([
+      createConfirmationInteraction(),
+      createQuestionInteraction(),
+    ]);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <IssueDetail />
+        </QueryClientProvider>,
+      );
+    });
+
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Ожидается ответ оператора");
+    expect(container.textContent).toContain("Ответьте на вопросы здесь");
+    expect(container.textContent).toContain("Уточнить задачу перед созданием ТЗ");
+    expect(container.textContent).not.toContain("Принять финальное ТЗ GER-118");
   });
 
   it("hides the plan decomposition panel by default", async () => {

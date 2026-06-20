@@ -69,6 +69,7 @@ import {
   type IssueChatRunFinalizationAction,
 } from "../components/IssueChatThread";
 import { IssueChatThreadClassic } from "../components/IssueChatThreadClassic";
+import { IssueThreadInteractionCard } from "../components/IssueThreadInteractionCard";
 import { useConferenceRoomChatEnabled } from "../hooks/useConferenceRoomChatEnabled";
 import { workModeMetaFor } from "../lib/work-mode-meta";
 import { IssueContinuationHandoff } from "../components/IssueContinuationHandoff";
@@ -202,6 +203,11 @@ type ActionableIssueThreadInteraction =
   | SuggestTasksInteraction
   | RequestConfirmationInteraction
   | RequestCheckboxConfirmationInteraction;
+type PendingOperatorInteraction =
+  | SuggestTasksInteraction
+  | RequestConfirmationInteraction
+  | RequestCheckboxConfirmationInteraction
+  | AskUserQuestionsInteraction;
 type ResolveRecoveryActionOutcome = "restored" | "false_positive" | "blocked" | "cancelled";
 type IssueDetailComment = (IssueComment | OptimisticIssueComment) & {
   runId?: string | null;
@@ -255,6 +261,33 @@ function treeControlPreviewErrorCopy(error: unknown): string {
     if (error.status === 422) return "This subtree action is currently invalid for the selected tasks.";
   }
   return error instanceof Error ? error.message : "Unable to load preview.";
+}
+
+function isPendingOperatorInteraction(
+  interaction: IssueThreadInteraction,
+): interaction is PendingOperatorInteraction {
+  return interaction.status === "pending" && (
+    interaction.kind === "ask_user_questions"
+    || interaction.kind === "request_confirmation"
+    || interaction.kind === "request_checkbox_confirmation"
+    || interaction.kind === "suggest_tasks"
+  );
+}
+
+function resolvePendingOperatorInteractions(
+  interactions: readonly IssueThreadInteraction[],
+): PendingOperatorInteraction[] {
+  const pending = interactions.filter(isPendingOperatorInteraction);
+  const questions = pending.filter((interaction) => interaction.kind === "ask_user_questions");
+  return questions.length > 0 ? questions : pending;
+}
+
+function formatOperatorInteractionCount(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${count} карточка`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} карточки`;
+  return `${count} карточек`;
 }
 
 export function canBoardResolveRecoveryAction(
@@ -1033,6 +1066,80 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   );
 });
 
+type PendingOperatorInteractionsPanelProps = {
+  interactions: PendingOperatorInteraction[];
+  agentMap: Map<string, Agent>;
+  currentUserId: string | null;
+  userLabelMap: ReadonlyMap<string, string> | null;
+  onAcceptInteraction: (
+    interaction: ActionableIssueThreadInteraction,
+    selectedClientKeys?: string[],
+    selectedOptionIds?: string[],
+  ) => Promise<void>;
+  onRejectInteraction: (interaction: ActionableIssueThreadInteraction, reason?: string) => Promise<void>;
+  onSubmitInteractionAnswers: (
+    interaction: IssueThreadInteraction,
+    answers: AskUserQuestionsAnswer[],
+  ) => Promise<void>;
+  onCancelInteraction: (interaction: AskUserQuestionsInteraction) => Promise<void>;
+  onUploadImage: (file: File) => Promise<string>;
+};
+
+const PendingOperatorInteractionsPanel = memo(function PendingOperatorInteractionsPanel({
+  interactions,
+  agentMap,
+  currentUserId,
+  userLabelMap,
+  onAcceptInteraction,
+  onRejectInteraction,
+  onSubmitInteractionAnswers,
+  onCancelInteraction,
+  onUploadImage,
+}: PendingOperatorInteractionsPanelProps) {
+  const hasQuestions = interactions.some((interaction) => interaction.kind === "ask_user_questions");
+  const description = hasQuestions
+    ? "Ответьте на вопросы здесь. После отправки процесс продолжит следующий шаг."
+    : "Нужно принять решение по ожидающим карточкам, чтобы процесс мог продолжить работу.";
+
+  return (
+    <section
+      aria-label="Ожидается ответ оператора"
+      className="space-y-3 border-l-4 border-sky-500 bg-sky-500/5 px-4 py-3"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-sky-900 dark:text-sky-100">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Нужно действие
+          </div>
+          <h2 className="text-base font-semibold text-foreground">Ожидается ответ оператора</h2>
+          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
+        </div>
+        <span className="rounded-sm border border-sky-500/40 bg-background/70 px-2.5 py-1 text-xs font-medium text-foreground">
+          {formatOperatorInteractionCount(interactions.length)}
+        </span>
+      </div>
+
+      <div className="space-y-3">
+        {interactions.map((interaction) => (
+          <IssueThreadInteractionCard
+            key={interaction.id}
+            interaction={interaction}
+            agentMap={agentMap}
+            currentUserId={currentUserId}
+            userLabelMap={userLabelMap}
+            onAcceptInteraction={onAcceptInteraction}
+            onRejectInteraction={onRejectInteraction}
+            onSubmitInteractionAnswers={onSubmitInteractionAnswers}
+            onCancelInteraction={onCancelInteraction}
+            onUploadImage={onUploadImage}
+          />
+        ))}
+      </div>
+    </section>
+  );
+});
+
 type IssueDetailActivityTabProps = {
   issue: Issue;
   issueId: string;
@@ -1405,6 +1512,10 @@ export function IssueDetail() {
     enabled: !!issueId,
     placeholderData: keepPreviousDataForSameQueryTail<IssueThreadInteraction[]>(issueId ?? "pending"),
   });
+  const pendingOperatorInteractions = useMemo(
+    () => resolvePendingOperatorInteractions(interactions),
+    [interactions],
+  );
 
   const { data: attachments, isLoading: attachmentsLoading } = useQuery({
     queryKey: queryKeys.issues.attachments(issueId!),
@@ -4140,6 +4251,20 @@ export function IssueDetail() {
           </div>
         );
       })()}
+
+      {pendingOperatorInteractions.length > 0 ? (
+        <PendingOperatorInteractionsPanel
+          interactions={pendingOperatorInteractions}
+          agentMap={agentMap}
+          currentUserId={currentUserId}
+          userLabelMap={userLabelMap}
+          onAcceptInteraction={handleAcceptInteraction}
+          onRejectInteraction={handleRejectInteraction}
+          onSubmitInteractionAnswers={handleSubmitInteractionAnswers}
+          onCancelInteraction={handleCancelInteraction}
+          onUploadImage={handleCommentImageUpload}
+        />
+      ) : null}
 
       <Separator />
 
