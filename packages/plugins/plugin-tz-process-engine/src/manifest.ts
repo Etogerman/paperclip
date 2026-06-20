@@ -5,8 +5,8 @@ const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
   version: "0.1.0",
-  displayName: "TZ Process Engine",
-  description: "Deterministic Process Engine MVP for GPT/Claude technical-spec creation cycles.",
+  displayName: "Движок создания ТЗ",
+  description: "MVP детерминированного движка процесса для циклов создания ТЗ через GPT/Claude.",
   author: "Paperclip",
   categories: ["automation"],
   capabilities: [
@@ -42,8 +42,8 @@ const manifest: PaperclipPluginManifestV1 = {
   localFolders: [
     {
       folderKey: "project-repo",
-      displayName: "Project repository",
-      description: "Read-only project checkout used by TZ Process Engine for code-enforced Repo Inventory and Fact Ledger checks.",
+      displayName: "Репозиторий проекта",
+      description: "Read-only checkout проекта для проверки Repo Inventory и Fact Ledger кодом движка создания ТЗ.",
       access: "read",
       requiredDirectories: [],
       requiredFiles: []

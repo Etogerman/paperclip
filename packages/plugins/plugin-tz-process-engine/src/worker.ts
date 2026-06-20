@@ -4577,7 +4577,7 @@ async function resumeReadyDraftingRuns(ctx: PluginContext) {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ blind draft dispatch", {
+      ctx.logger.error("Не удалось возобновить отправку задач слепого черновика ТЗ", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -4611,7 +4611,7 @@ async function resumeReadyPingPongRuns(ctx: PluginContext) {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ ping-pong round 1 dispatch", {
+      ctx.logger.error("Не удалось возобновить отправку первого ping-pong раунда ТЗ", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -4645,7 +4645,7 @@ async function resumeReadyConvergenceCheckRuns(ctx: PluginContext) {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ convergence check dispatch", {
+      ctx.logger.error("Не удалось возобновить отправку проверки схождения ТЗ", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -4679,7 +4679,7 @@ async function resumeReadyConvergenceDecisionRuns(ctx: PluginContext) {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ convergence decision dispatch", {
+      ctx.logger.error("Не удалось возобновить принятие решения о схождении ТЗ", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -4713,7 +4713,7 @@ async function resumeReadyQaReviewRuns(ctx: PluginContext) {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ QA review dispatch", {
+      ctx.logger.error("Не удалось возобновить отправку QA-проверки ТЗ", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -4747,7 +4747,7 @@ async function resumeReadyQaDecisionRuns(ctx: PluginContext) {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to resume TZ QA decision dispatch", {
+      ctx.logger.error("Не удалось возобновить принятие QA-решения по ТЗ", {
         runId: run.id,
         issueId: run.rootIssueId,
         error: err instanceof Error ? err.message : String(err),
@@ -4795,7 +4795,7 @@ async function handleIssueProgressEvent(ctx: PluginContext, event: PluginEvent) 
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      ctx.logger.error("Failed to handle TZ issue progress event", {
+      ctx.logger.error("Не удалось обработать событие прогресса задачи ТЗ", {
         runId: run.id,
         issueId,
         eventType: event.eventType,
@@ -4896,7 +4896,7 @@ const plugin = definePlugin({
 
   async onApiRequest(input: PluginApiRequestInput) {
     if (!activeContext || !startCycle || !readStatus || !runReadinessCheck) {
-      throw new Error("TZ Process Engine is not ready");
+      throw new Error("Движок создания ТЗ ещё не готов");
     }
 
     if (input.routeKey === "start-cycle") {
@@ -4936,14 +4936,14 @@ const plugin = definePlugin({
 
     return {
       status: 404,
-      body: { error: `Unknown TZ Process Engine route: ${input.routeKey}` },
+      body: { error: `Неизвестный маршрут движка создания ТЗ: ${input.routeKey}` },
     };
   },
 
   async onHealth() {
     return {
       status: "ok",
-      message: "TZ Process Engine plugin worker is running",
+      message: "Worker плагина движка создания ТЗ работает",
       details: {
         databaseNamespace: activeContext?.db.namespace ?? null,
         processKey: PROCESS_KEY,

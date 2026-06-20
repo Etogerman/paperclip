@@ -1,57 +1,54 @@
-# TZ Process Engine
+# Движок создания ТЗ
 
-Paperclip plugin MVP for deterministic GPT/Claude technical-spec creation cycles.
+MVP-плагин Paperclip для детерминированного цикла создания технических заданий через пару GPT/Claude.
 
-This package is intentionally a small process-engine skeleton, not the full
-agent loop yet. It establishes the installable plugin shape and the persistent
-state model that the full process will use.
+Этот пакет намеренно остаётся небольшим каркасом движка процесса, а не полным агентским циклом. Он задаёт форму устанавливаемого плагина и модель состояния, которую будет использовать полный процесс.
 
-## Current MVP Scope
+## Текущий объём MVP
 
-- plugin manifest and installable worker package
-- plugin-owned Postgres namespace
-- `tz_process_runs` authoritative state table
-- `tz_process_events` append-only trace table
-- `tz_process_artifacts` private/staged artifact table for blind drafts
-- `tz_repo_inventories`, `tz_fact_checks`, and `tz_readiness_gates` for code-enforced Repo Inventory / Fact Ledger checks
-- read-only local folder declaration `project-repo` for repository scanning
-- scoped API routes:
-  - `POST /issues/:issueId/tz-process/start`
-  - `GET /issues/:issueId/tz-process`
-  - `POST /issues/:issueId/tz-process/readiness-check`
-- plugin actions/data:
-  - `start-cycle`
-  - `status`
-  - `run-readiness-check`
-- trace issue document: `tz-process-trace`
-- readiness report issue document: `tz-readiness-report`
-- event listener for issue thread interaction resolutions
+- манифест плагина и устанавливаемый worker-пакет;
+- собственное пространство имён Postgres для плагина;
+- авторитетная таблица состояния `tz_process_runs`;
+- append-only журнал событий `tz_process_events`;
+- приватная таблица черновиков `tz_process_artifacts` для слепого раунда;
+- таблицы `tz_repo_inventories`, `tz_fact_checks` и `tz_readiness_gates` для проверки фактов кодом;
+- read-only локальная папка `project-repo` для чтения репозитория;
+- ограниченные API-маршруты:
+  - `POST /issues/:issueId/tz-process/start`;
+  - `GET /issues/:issueId/tz-process`;
+  - `POST /issues/:issueId/tz-process/readiness-check`;
+- действия и данные плагина:
+  - `start-cycle`;
+  - `status`;
+  - `run-readiness-check`;
+- документ трассы процесса `tz-process-trace`;
+- документ отчёта готовности `tz-readiness-report`;
+- обработчик событий по ответам оператора.
 
-## Not In This Skeleton Yet
+## Чего ещё нет в этом каркасе
 
-- GPT/Claude agent session calls
-- author ping-pong rounds
-- convergence detection
-- synthesis
-- cross-vendor QA
-- operator gate UI
+- вызовов сессий GPT/Claude-агентов;
+- полноценных ping-pong раундов авторов;
+- проверки схождения;
+- синтеза финального ТЗ;
+- кросс-вендорного QA;
+- отдельных ворот оператора в интерфейсе.
 
 ## Repo Inventory / Fact Ledger
 
-`run-readiness-check` verifies code claims through plugin code, not through an agent's prose.
+`run-readiness-check` проверяет утверждения о коде через код плагина, а не через текст агента.
 
-The operator configures the `project-repo` local folder for the company. The plugin then reads that folder through the Paperclip SDK and evaluates fact predicates such as:
+Оператор настраивает для компании локальную папку `project-repo`. После этого плагин читает эту папку через Paperclip SDK и проверяет предикаты фактов:
 
-- `file_exists`
-- `text_search`
-- `regex_search`
+- `file_exists`;
+- `text_search`;
+- `regex_search`.
 
-Only this code path can write `confirmed` facts into `tz_fact_checks`. Missing matches remain `missing`, and the readiness gate is `blocked` until every required fact is confirmed.
+Только этот кодовый путь может записать статус `confirmed` в `tz_fact_checks`. Если совпадение не найдено, факт остаётся в статусе `missing`, а gate готовности остаётся `blocked`, пока все обязательные факты не подтверждены.
 
-Those layers should be added on top of this package after the plugin can be
-installed and the start/status flow is verified in a real Paperclip instance.
+Следующие слои нужно добавлять поверх этого пакета после проверки установки плагина и базового потока start/status в реальном экземпляре Paperclip.
 
-## Development
+## Разработка
 
 ```bash
 pnpm --filter @paperclipai/plugin-tz-process-engine typecheck
@@ -59,9 +56,9 @@ pnpm --filter @paperclipai/plugin-tz-process-engine test
 pnpm --filter @paperclipai/plugin-tz-process-engine build
 ```
 
-## Local Install
+## Локальная установка
 
-Use an absolute local path during development:
+Во время разработки используй абсолютный локальный путь:
 
 ```bash
 curl -X POST http://127.0.0.1:3100/api/plugins/install \

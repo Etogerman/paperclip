@@ -2515,8 +2515,8 @@ export function IssueDetail() {
     },
     onError: (err) => {
       pushToast({
-        title: "Submit failed",
-        body: err instanceof Error ? err.message : "Unable to submit answers",
+        title: "Не удалось отправить",
+        body: err instanceof Error ? err.message : "Не удалось отправить ответы",
         tone: "error",
       });
     },
@@ -2530,14 +2530,14 @@ export function IssueDetail() {
       invalidateIssueDetail();
       invalidateIssueCollections();
       pushToast({
-        title: "Question cancelled",
+        title: "Вопрос отменён",
         tone: "success",
       });
     },
     onError: (err) => {
       pushToast({
-        title: "Cancel failed",
-        body: err instanceof Error ? err.message : "Unable to cancel the question",
+        title: "Не удалось отменить",
+        body: err instanceof Error ? err.message : "Не удалось отменить вопрос",
         tone: "error",
       });
     },
