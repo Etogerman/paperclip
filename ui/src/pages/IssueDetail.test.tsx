@@ -285,6 +285,13 @@ vi.mock("../components/IssueChatThreadClassic", () => ({
 }));
 
 vi.mock("../components/IssueThreadInteractionCard", () => ({
+  AskUserQuestionsCard: ({ interaction }: {
+    interaction: { payload?: { questions?: unknown[] } };
+  }) => (
+    <div data-testid="operator-question-form">
+      Форма ответа: {interaction.payload?.questions?.length ?? 0}
+    </div>
+  ),
   IssueThreadInteractionCard: ({ interaction }: {
     interaction: { title?: string | null; payload?: { title?: string | null } };
   }) => (
@@ -1114,9 +1121,11 @@ describe("IssueDetail", () => {
     await flushReact();
     await flushReact();
 
-    expect(container.textContent).toContain("Ожидается ответ оператора");
-    expect(container.textContent).toContain("Ответьте на вопросы здесь");
+    expect(container.textContent).toContain("Ответьте на 1 вопрос");
+    expect(container.textContent).toContain("Задача для оператора");
+    expect(container.textContent).toContain("Что сделать:");
     expect(container.textContent).toContain("Уточнить задачу перед созданием ТЗ");
+    expect(container.textContent).toContain("Форма ответа: 1");
     expect(container.textContent).not.toContain("Принять финальное ТЗ GER-118");
   });
 

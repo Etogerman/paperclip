@@ -69,7 +69,10 @@ import {
   type IssueChatRunFinalizationAction,
 } from "../components/IssueChatThread";
 import { IssueChatThreadClassic } from "../components/IssueChatThreadClassic";
-import { IssueThreadInteractionCard } from "../components/IssueThreadInteractionCard";
+import {
+  AskUserQuestionsCard,
+  IssueThreadInteractionCard,
+} from "../components/IssueThreadInteractionCard";
 import { useConferenceRoomChatEnabled } from "../hooks/useConferenceRoomChatEnabled";
 import { workModeMetaFor } from "../lib/work-mode-meta";
 import { IssueContinuationHandoff } from "../components/IssueContinuationHandoff";
@@ -288,6 +291,14 @@ function formatOperatorInteractionCount(count: number) {
   if (mod10 === 1 && mod100 !== 11) return `${count} карточка`;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} карточки`;
   return `${count} карточек`;
+}
+
+function formatQuestionCount(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${count} вопрос`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} вопроса`;
+  return `${count} вопросов`;
 }
 
 export function canBoardResolveRecoveryAction(
@@ -1097,22 +1108,29 @@ const PendingOperatorInteractionsPanel = memo(function PendingOperatorInteractio
   onUploadImage,
 }: PendingOperatorInteractionsPanelProps) {
   const hasQuestions = interactions.some((interaction) => interaction.kind === "ask_user_questions");
+  const questionCount = interactions.reduce(
+    (count, interaction) =>
+      count + (interaction.kind === "ask_user_questions" ? interaction.payload.questions.length : 0),
+    0,
+  );
   const description = hasQuestions
-    ? "Ответьте на вопросы здесь. После отправки процесс продолжит следующий шаг."
+    ? "Это действие для оператора. Ответьте один раз, после этого авторы продолжат работу."
     : "Нужно принять решение по ожидающим карточкам, чтобы процесс мог продолжить работу.";
 
   return (
     <section
       aria-label="Ожидается ответ оператора"
-      className="space-y-3 border-l-4 border-sky-500 bg-sky-500/5 px-4 py-3"
+      className="space-y-4 border-l-4 border-sky-500 bg-sky-500/5 px-4 py-3"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-sky-900 dark:text-sky-100">
             <AlertTriangle className="h-3.5 w-3.5" />
-            Нужно действие
+            Нужно действие от вас
           </div>
-          <h2 className="text-base font-semibold text-foreground">Ожидается ответ оператора</h2>
+          <h2 className="text-base font-semibold text-foreground">
+            {hasQuestions ? `Ответьте на ${formatQuestionCount(questionCount)}` : "Ожидается решение оператора"}
+          </h2>
           <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
         </div>
         <span className="rounded-sm border border-sky-500/40 bg-background/70 px-2.5 py-1 text-xs font-medium text-foreground">
@@ -1121,20 +1139,61 @@ const PendingOperatorInteractionsPanel = memo(function PendingOperatorInteractio
       </div>
 
       <div className="space-y-3">
-        {interactions.map((interaction) => (
-          <IssueThreadInteractionCard
-            key={interaction.id}
-            interaction={interaction}
-            agentMap={agentMap}
-            currentUserId={currentUserId}
-            userLabelMap={userLabelMap}
-            onAcceptInteraction={onAcceptInteraction}
-            onRejectInteraction={onRejectInteraction}
-            onSubmitInteractionAnswers={onSubmitInteractionAnswers}
-            onCancelInteraction={onCancelInteraction}
-            onUploadImage={onUploadImage}
-          />
-        ))}
+        {interactions.map((interaction) => {
+          if (interaction.kind === "ask_user_questions") {
+            return (
+              <div key={interaction.id} className="space-y-4 rounded-sm border border-sky-500/35 bg-background p-4">
+                <div className="space-y-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700 dark:text-sky-200">
+                    Задача для оператора
+                  </div>
+                  <h3 className="text-lg font-semibold text-foreground">
+                    {interaction.title ?? interaction.payload.title ?? "Ответить на вопросы"}
+                  </h3>
+                  {interaction.summary ? (
+                    <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+                      {interaction.summary}
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="rounded-sm border border-border/70 bg-muted/35 px-3 py-2 text-sm leading-6 text-foreground">
+                  <div className="font-medium">Что сделать:</div>
+                  <div className="text-muted-foreground">
+                    выберите варианты ниже; если нужно добавить текст, нажмите
+                    {" "}
+                    <span className="font-medium text-foreground">Свой ответ</span>
+                    ; затем нажмите кнопку отправки внизу формы.
+                  </div>
+                </div>
+
+                <AskUserQuestionsCard
+                  interaction={interaction}
+                  variant="operator"
+                  onSubmitInteractionAnswers={(nextInteraction, answers) =>
+                    onSubmitInteractionAnswers(nextInteraction, answers)}
+                  onCancelInteraction={(nextInteraction) =>
+                    onCancelInteraction(nextInteraction)}
+                />
+              </div>
+            );
+          }
+
+          return (
+            <IssueThreadInteractionCard
+              key={interaction.id}
+              interaction={interaction}
+              agentMap={agentMap}
+              currentUserId={currentUserId}
+              userLabelMap={userLabelMap}
+              onAcceptInteraction={onAcceptInteraction}
+              onRejectInteraction={onRejectInteraction}
+              onSubmitInteractionAnswers={onSubmitInteractionAnswers}
+              onCancelInteraction={onCancelInteraction}
+              onUploadImage={onUploadImage}
+            />
+          );
+        })}
       </div>
     </section>
   );
