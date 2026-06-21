@@ -33,6 +33,7 @@ export function buildNewAgentHirePayload(input: {
     defaultEnvironmentId: configValues.defaultEnvironmentId ?? null,
     adapterConfig,
     runtimeConfig: buildNewAgentRuntimeConfig({
+      role: effectiveRole,
       heartbeatEnabled: configValues.heartbeatEnabled,
       intervalSec: configValues.intervalSec,
       cheapModel: configValues.cheapModel,

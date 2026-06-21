@@ -542,7 +542,7 @@ export function OnboardingWizard() {
         role: "ceo",
         adapterType,
         adapterConfig: buildAdapterConfig(),
-        runtimeConfig: buildNewAgentRuntimeConfig()
+        runtimeConfig: buildNewAgentRuntimeConfig({ role: "ceo" })
       });
       if (hire.approval) {
         await approvalsApi.approve(
