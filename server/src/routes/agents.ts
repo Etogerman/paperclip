@@ -8,6 +8,7 @@ import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   agentSkillSyncSchema,
   agentMineInboxQuerySchema,
+  AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS,
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   createAgentKeySchema,
   createAgentHireSchema,
@@ -1018,7 +1019,13 @@ export function agentRoutes(
     };
   }
 
-  function normalizeNewAgentRuntimeConfig(runtimeConfig: unknown): Record<string, unknown> {
+  function defaultMaxConcurrentRunsForRole(role: unknown) {
+    return typeof role === "string" && role.trim().toLowerCase() === "ceo"
+      ? AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS
+      : AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+  }
+
+  function normalizeNewAgentRuntimeConfig(runtimeConfig: unknown, role: unknown): Record<string, unknown> {
     const parsedRuntimeConfig = asRecord(runtimeConfig);
     const normalizedRuntimeConfig = parsedRuntimeConfig ? { ...parsedRuntimeConfig } : {};
     const parsedHeartbeat = asRecord(normalizedRuntimeConfig.heartbeat);
@@ -1028,7 +1035,7 @@ export function agentRoutes(
       heartbeat.enabled = false;
     }
     if (parseNumberLike(heartbeat.maxConcurrentRuns) == null) {
-      heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+      heartbeat.maxConcurrentRuns = defaultMaxConcurrentRunsForRole(role);
     }
 
     normalizedRuntimeConfig.heartbeat = heartbeat;
@@ -2250,7 +2257,7 @@ export function agentRoutes(
     const normalizedRuntimeConfig = await normalizeRuntimeConfigAdapterConfigsForPersistence(
       companyId,
       hireInput.adapterType,
-      normalizeNewAgentRuntimeConfig(hireInput.runtimeConfig),
+      normalizeNewAgentRuntimeConfig(hireInput.runtimeConfig, hireInput.role),
       normalizedAdapterConfig,
     );
     const normalizedHireInput = {
@@ -2443,7 +2450,7 @@ export function agentRoutes(
     const normalizedRuntimeConfig = await normalizeRuntimeConfigAdapterConfigsForPersistence(
       companyId,
       createInput.adapterType,
-      normalizeNewAgentRuntimeConfig(createInput.runtimeConfig),
+      normalizeNewAgentRuntimeConfig(createInput.runtimeConfig, createInput.role),
       normalizedAdapterConfig,
     );
     await assertAgentEnvironmentSelection(companyId, createInput.adapterType, createInput.defaultEnvironmentId);

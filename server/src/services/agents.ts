@@ -17,6 +17,7 @@ import {
   issueComments,
 } from "@paperclipai/db";
 import {
+  AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS,
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
   getAgentWorkEligibility,
   isUuidLike,
@@ -131,13 +132,19 @@ function parseFiniteNumberLike(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizeRuntimeConfigForNewAgent(runtimeConfig: unknown): Record<string, unknown> {
+function defaultMaxConcurrentRunsForRole(role: unknown) {
+  return typeof role === "string" && role.trim().toLowerCase() === "ceo"
+    ? AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS
+    : AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+}
+
+function normalizeRuntimeConfigForNewAgent(runtimeConfig: unknown, role: unknown): Record<string, unknown> {
   const normalizedRuntimeConfig = isPlainRecord(runtimeConfig) ? { ...runtimeConfig } : {};
   const heartbeat = isPlainRecord(normalizedRuntimeConfig.heartbeat)
     ? { ...normalizedRuntimeConfig.heartbeat }
     : {};
   if (parseFiniteNumberLike(heartbeat.maxConcurrentRuns) == null) {
-    heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+    heartbeat.maxConcurrentRuns = defaultMaxConcurrentRunsForRole(role);
   }
   normalizedRuntimeConfig.heartbeat = heartbeat;
   return normalizedRuntimeConfig;
@@ -502,7 +509,7 @@ export function agentService(db: Db) {
 
       const role = data.role ?? "general";
       const normalizedPermissions = normalizeAgentPermissions(data.permissions, role);
-      const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig);
+      const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig, role);
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const created = await tx

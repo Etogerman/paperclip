@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
+import { AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS, AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
 import { buildNewAgentRuntimeConfig } from "./new-agent-runtime-config";
 
 describe("buildNewAgentRuntimeConfig", () => {
@@ -29,6 +29,18 @@ describe("buildNewAgentRuntimeConfig", () => {
         wakeOnDemand: true,
         cooldownSec: 10,
         maxConcurrentRuns: AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+      },
+    });
+  });
+
+  it("defaults CEO agents to one concurrent heartbeat run", () => {
+    expect(buildNewAgentRuntimeConfig({ role: "ceo" })).toEqual({
+      heartbeat: {
+        enabled: false,
+        intervalSec: 300,
+        wakeOnDemand: true,
+        cooldownSec: 10,
+        maxConcurrentRuns: AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS,
       },
     });
   });

@@ -2,7 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
-import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
+import { AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS, LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
@@ -982,6 +982,44 @@ describe.sequential("agent permission routes", () => {
             enabled: false,
             intervalSec: 3600,
             maxConcurrentRuns: 20,
+          },
+        },
+      }),
+    );
+  });
+
+  it("normalizes CEO creation to one concurrent heartbeat run by default", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/companies/${companyId}/agents`)
+      .send({
+        name: "CEO",
+        role: "ceo",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {
+          heartbeat: {
+            intervalSec: 300,
+          },
+        },
+      }));
+
+    expect([200, 201]).toContain(res.status);
+    expect(mockAgentService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({
+        runtimeConfig: {
+          heartbeat: {
+            enabled: false,
+            intervalSec: 300,
+            maxConcurrentRuns: AGENT_CEO_DEFAULT_MAX_CONCURRENT_RUNS,
           },
         },
       }),
