@@ -2124,7 +2124,7 @@ describe("IssueChatThread", () => {
     });
 
     const otherButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Other"),
+      button.textContent?.includes("Свой ответ"),
     );
     expect(otherButton).toBeTruthy();
 
@@ -2188,7 +2188,7 @@ describe("IssueChatThread", () => {
     });
 
     const cancelButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Cancel question"),
+      button.textContent?.includes("Отменить вопрос"),
     );
     expect(cancelButton).toBeTruthy();
 
